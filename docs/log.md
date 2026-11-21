@@ -1,0 +1,7 @@
+# Vernie OS Knowledge Bundle Update Log
+
+## 2026-11-21
+* **Initialization**: Created OKF v0.2 knowledge bundle structure under `docs/` with two-tier validator (`tools/validate_okf.py`).
+* **Creation**: Added Phase 1 concepts for [Vernie OS Architecture](architecture/vernie-os.md), [Web Cockpit PWA](architecture/web-cockpit.md), [Move Hub Hardware](hardware/move-hub.md), [Vernie Mechanics](hardware/vernie-mechanics.md), [BLE AppData Protocol](protocol/ble-appdata.md), [LWP3 Bootloader](protocol/lwp3-bootloader.md), and [Flashing & Recovery Playbook](playbooks/flashing-and-recovery.md).
+* **Creation**: Added Attested Computations for [LWP3 Bootloader Checksum](computations/lwp3-checksum.md) and [Flash/SRAM & Pure-MIT Budget](computations/flash-ram-budget.md), verified via deterministic Python attesters.
+* **Hardening**: Completed Phase 1 independent code review and fixed all 5 Critical & 9 Important issues (freestanding `string_minimal.c` non-recursive compilation + ELF disassembly attester guard, resilient `vernie_runtime.c` BLE advertising & debounced button/LED caching, `0x05` reboot disconnect tolerance, `CoalescingGattWriter` error safety, LWP3 flasher XOR/count/status/abort validation, 12-byte BlueNRG hub-name ceiling, 104 KiB `FLASH_FIRMWARE` ceiling, and non-mutating `NoDateSafeLoader` in `validate_okf.py`). Expanded automated test suite to 3 ASan/UBSan C suites (including 10k-packet fuzz), 21 pytest cases (including schema-driven C/TS parity), and 20 Vitest unit + React UI tests (`28,904 B` Flash, `8,076 B` RAM, `0x00000000` residual).

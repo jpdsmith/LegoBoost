@@ -1,0 +1,114 @@
+{
+  "schema_version": "1.0.0",
+  "transport": {
+    "pybricks_service_uuid": "c5f50001-8280-46da-89f4-6d8051e4aeef",
+    "pybricks_command_event_char_uuid": "c5f50002-8280-46da-89f4-6d8051e4aeef",
+    "pybricks_hub_capabilities_char_uuid": "c5f50003-8280-46da-89f4-6d8051e4aeef",
+    "lwp3_bootloader_service_uuid": "00001625-1212-efde-1623-785feabcd123",
+    "lwp3_bootloader_char_uuid": "00001626-1212-efde-1623-785feabcd123",
+    "att_mtu": 23,
+    "att_payload_max": 20,
+    "l1_cmd_reboot_to_update_mode": 5,
+    "l1_cmd_write_app_data": 7,
+    "l1_event_write_app_data": 2,
+    "rx_app_data_max_bytes": 17,
+    "tx_app_data_max_bytes": 19,
+    "bootloader_move_hub_device_id": 64,
+    "bootloader_move_hub_chunk_max_bytes": 14,
+    "bootloader_checksum_size": 108544,
+    "bootloader_throttle_interval": 10
+  },
+  "opcodes": {
+    "DRIVE": 1,
+    "HEAD": 2,
+    "DART": 3,
+    "SYNTH": 4,
+    "LED": 5,
+    "SET_MODE": 6,
+    "MACRO_OP": 7,
+    "TELEMETRY": 128
+  },
+  "constants": {
+    "drive_timeout_min_ms": 100,
+    "drive_timeout_max_ms": 1000,
+    "head_angle_min_deg": -40,
+    "head_angle_max_deg": 35,
+    "head_angle_home_sentinel": 127,
+    "dart_magic": 165,
+    "dart_subcmd_disarm": 0,
+    "dart_subcmd_arm": 1,
+    "dart_subcmd_fire": 2,
+    "led_target_hub_rgb": 0,
+    "led_target_chest_4state": 1,
+    "chest_led_off": 0,
+    "chest_led_blue": 3,
+    "chest_led_green": 5,
+    "chest_led_red": 9,
+    "mode_max": 4,
+    "telemetry_size_bytes": 18,
+    "macro_chunk_max_data_bytes": 14
+  },
+  "telemetry_flags": {
+    "PICKED_UP": 1,
+    "BUMP": 2,
+    "TAP": 4,
+    "DART_ARMED": 8,
+    "HEAD_HOMED": 16,
+    "SENSOR_OK": 32,
+    "SAFE_MODE": 64,
+    "SYNTH_ACTIVE": 128
+  },
+  "golden_vectors": {
+    "rx_drive": {
+      "fields": { "opcode": 1, "left": -75, "right": 100, "timeout_ms": 400 },
+      "bytes": [1, 181, 100, 144, 1]
+    },
+    "rx_head_angle": {
+      "fields": { "opcode": 2, "angle_deg": -25, "speed": 60 },
+      "bytes": [2, 231, 60]
+    },
+    "rx_head_home": {
+      "fields": { "opcode": 2, "angle_deg": 127, "speed": 25 },
+      "bytes": [2, 127, 25]
+    },
+    "rx_dart_arm": {
+      "fields": { "opcode": 3, "subcmd": 1, "magic": 165 },
+      "bytes": [3, 1, 165]
+    },
+    "rx_synth": {
+      "fields": { "opcode": 4, "voice": 1, "preset_or_note": 69, "dur_ms": 250 },
+      "bytes": [4, 1, 69, 250, 0]
+    },
+    "rx_led_hub": {
+      "fields": { "opcode": 5, "target": 0, "a": 16, "b": 200, "c": 255 },
+      "bytes": [5, 0, 16, 200, 255]
+    },
+    "rx_set_mode": {
+      "fields": { "opcode": 6, "mode_id": 4 },
+      "bytes": [6, 4]
+    },
+    "rx_macro_chunk": {
+      "fields": { "opcode": 7, "subcmd": 1, "offset": 0, "data": [10, 20, 30, 40] },
+      "bytes": [7, 1, 0, 10, 20, 30, 40]
+    },
+    "tx_telemetry": {
+      "fields": {
+        "opcode": 128,
+        "battery_mv": 8120,
+        "distance_pct": 42,
+        "color_id": 3,
+        "pitch_deg": -12,
+        "roll_deg": 5,
+        "flags": 96,
+        "mode_id": 4,
+        "enc_a": -1234,
+        "enc_b": 4321,
+        "head_deg": -15,
+        "speed_a": -50,
+        "speed_b": 50,
+        "seq": 201
+      },
+      "bytes": [128, 184, 31, 42, 3, 244, 5, 96, 4, 46, 251, 225, 16, 241, 255, 206, 50, 201]
+    }
+  }
+}

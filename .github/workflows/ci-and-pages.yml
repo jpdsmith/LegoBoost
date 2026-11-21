@@ -1,0 +1,107 @@
+name: Vernie OS CI & GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with direct submodules
+        uses: actions/checkout@v4
+        with:
+          # Non-recursive submodules keeps nested MicroPython out while fetching pinned submodule commits reliably.
+          submodules: true
+
+      - name: Install ARM Cortex-M0 toolchain & Python test deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-arm-none-eabi python3-yaml python3-pytest
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Layer 1-3 — Build pure-MIT firmware, run attester gates & ASan/UBSan C tests
+        run: |
+          make -C firmware PYTHON=/usr/bin/python3 -j4 all verify-gates test
+
+      - name: Layer 2 & 5 — Validate OKF v0.2 bundle (conformance + strict) & run Python pytest
+        run: |
+          /usr/bin/python3 tools/validate_okf.py docs/
+          /usr/bin/python3 tools/validate_okf.py --strict docs/
+          /usr/bin/python3 -m pytest -v tools/tests/
+
+      - name: Stage compiled firmware & verified manifest into Chromebook PWA public bundle
+        run: |
+          mkdir -p webapp/public/firmware
+          /usr/bin/python3 tools/pack_firmware.py \
+            --base-bin firmware/build/firmware-base.bin \
+            --map-file firmware/build/firmware.elf.map \
+            --elf-file firmware/build/firmware.elf \
+            --version vernie-os-0.1.0 \
+            --hub-name VernieOS \
+            --out-zip webapp/public/firmware/firmware.zip \
+            --out-bin webapp/public/firmware/firmware.bin \
+            --out-manifest webapp/public/firmware/manifest.json \
+            --verify
+          /usr/bin/python3 docs/references/attesters/attest_lwp3_checksum.py \
+            --bin webapp/public/firmware/firmware.bin \
+            --checksum-size 108544 \
+            --receipt webapp/public/firmware/manifest.json
+
+      - name: Layer 4 — Run Vitest (unit + React UI) & build Chromebook Web Bluetooth PWA
+        run: |
+          npm --prefix webapp ci
+          npm --prefix webapp test
+          npm --prefix webapp run build
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vernie-os-movehub-firmware
+          path: |
+            firmware/build/firmware.bin
+            firmware/build/firmware.zip
+            firmware/build/firmware.elf
+            webapp/public/firmware/manifest.json
+
+      - name: Setup GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: webapp/dist
+
+  deploy-pages:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Chromebook Vernie Cockpit to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

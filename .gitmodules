@@ -1,0 +1,10 @@
+[submodule "third_party/pybricks-micropython"]
+	path = third_party/pybricks-micropython
+	url = https://github.com/pybricks/pybricks-micropython.git
+[submodule "third_party/stm32lib"]
+	path = third_party/stm32lib
+	url = https://github.com/pybricks/stm32lib.git
+	branch = pybricks
+[submodule "third_party/CMSIS_6"]
+	path = third_party/CMSIS_6
+	url = https://github.com/ARM-software/CMSIS_6.git
