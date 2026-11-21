@@ -10,8 +10,9 @@ import { HeadAndDart } from "./components/HeadAndDart";
 import { ModeAndMacros } from "./components/ModeAndMacros";
 import { MotorSynthPad } from "./components/MotorSynthPad";
 import { TelemetryHud } from "./components/TelemetryHud";
+import { VisionVoiceBackpack } from "./components/VisionVoiceBackpack";
 
-type CockpitTab = "cockpit" | "synth" | "macros" | "flasher";
+type CockpitTab = "cockpit" | "synth" | "macros" | "vision" | "flasher";
 
 export const App: React.FC = () => {
   const bleSupported = typeof navigator !== "undefined" && Boolean(navigator.bluetooth);
@@ -109,6 +110,7 @@ export const App: React.FC = () => {
     { id: "cockpit", label: "Drive & Head" },
     { id: "synth", label: "Motor Synth & LEDs" },
     { id: "macros", label: "Modes & Macros" },
+    { id: "vision", label: "Vision & Voice" },
     { id: "flasher", label: "Flasher & Recovery" },
   ];
 
@@ -212,6 +214,27 @@ export const App: React.FC = () => {
             onPlayMacro={() => runBleThrowing(() => client.playMacro())}
             onStopMacro={() => runBleThrowing(() => client.stopMacro())}
             onClearMacro={() => runBleThrowing(() => client.clearMacro(true))}
+          />
+        )}
+
+        {activeTab === "vision" && (
+          <VisionVoiceBackpack
+            connected={connected}
+            disabled={motionDisabled}
+            safeMode={safeMode}
+            headHomed={headHomed}
+            headDeg={telemetry?.headDeg ?? 0}
+            pickedUp={pickedUp}
+            distancePct={telemetry?.distancePct ?? 255}
+            onDrive={(l, r, t) => client.sendDrive(l, r, t)}
+            onHead={(deg, spd, coalesce) =>
+              void runBle(() => client.sendHead(deg, spd, { coalesce }))
+            }
+            onSynth={(v, n, d) => void runBle(() => client.sendSynth(v, n, d))}
+            onSetHubLed={(r, g, b) => void runBle(() => client.sendHubLed(r, g, b))}
+            onSetMode={(m) => void runBle(() => client.sendSetMode(m))}
+            onPlayMacro={() => runBleThrowing(() => client.playMacro())}
+            onStopMacro={() => runBleThrowing(() => client.stopMacro())}
           />
         )}
 

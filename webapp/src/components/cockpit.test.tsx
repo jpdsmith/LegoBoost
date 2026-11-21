@@ -20,6 +20,7 @@ import { HeadAndDart } from "./HeadAndDart";
 import { ModeAndMacros } from "./ModeAndMacros";
 import { MotorSynthPad } from "./MotorSynthPad";
 import { TelemetryHud } from "./TelemetryHud";
+import { VisionVoiceBackpack } from "./VisionVoiceBackpack";
 
 afterEach(() => {
   cleanup();
@@ -425,8 +426,89 @@ describe("FirmwareUpdater Chromebook UX & pre-flash safety", () => {
   });
 });
 
+describe("VisionVoiceBackpack simulated tracking & voice safety controls", () => {
+  it("tracks simulated targets cleanly, enforces C2 unhomed guard, and blocks voice dart firing", () => {
+    const onDrive = vi.fn();
+    const onHead = vi.fn();
+    const onSynth = vi.fn();
+    const onSetHubLed = vi.fn();
+    const onSetMode = vi.fn();
+    const onPlayMacro = vi.fn().mockResolvedValue(undefined);
+    const onStopMacro = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = render(
+      <VisionVoiceBackpack
+        connected={true}
+        disabled={false}
+        safeMode={false}
+        headHomed={false}
+        headDeg={0}
+        pickedUp={false}
+        distancePct={80}
+        onDrive={onDrive}
+        onHead={onHead}
+        onSynth={onSynth}
+        onSetHubLed={onSetHubLed}
+        onSetMode={onSetMode}
+        onPlayMacro={onPlayMacro}
+        onStopMacro={onStopMacro}
+      />
+    );
+
+    // Head Follow when unhomed MUST NOT dispatch head angle (C2)
+    fireEvent.click(screen.getByRole("button", { name: /Target Right/i }));
+    expect(onHead).not.toHaveBeenCalled();
+
+    // Once homed, Target Right moves head smoothly with coalesce=true
+    rerender(
+      <VisionVoiceBackpack
+        connected={true}
+        disabled={false}
+        safeMode={false}
+        headHomed={true}
+        headDeg={0}
+        pickedUp={false}
+        distancePct={80}
+        onDrive={onDrive}
+        onHead={onHead}
+        onSynth={onSynth}
+        onSetHubLed={onSetHubLed}
+        onSetMode={onSetMode}
+        onPlayMacro={onPlayMacro}
+        onStopMacro={onStopMacro}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Target Right/i }));
+    expect(onHead).toHaveBeenCalledWith(expect.any(Number), 50, true);
+
+    // Switch to Wave React and trigger Simulate Wave -> Happy Chirp + Emerald LED
+    fireEvent.change(screen.getByLabelText(/Vision tracking behavior/i), {
+      target: { value: "wave-react" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Simulate Wave/i }));
+    expect(onSynth).toHaveBeenCalledWith(0, 2, 0);
+    expect(onSetHubLed).toHaveBeenCalledWith(16, 220, 96);
+
+    // Manual voice command: "fire dart" MUST be refused cleanly
+    const input = screen.getByLabelText(/Voice or text command/i);
+    fireEvent.change(input, { target: { value: "fire dart now" } });
+    fireEvent.click(screen.getByRole("button", { name: /Run Command/i }));
+    expect(screen.getByText(/dart-refused/i)).toBeTruthy();
+
+    // Quick voice prompt "Explorer mode" switches to Mode 1
+    fireEvent.click(screen.getByRole("button", { name: /Explorer mode/i }));
+    expect(onSetMode).toHaveBeenCalledWith(1);
+
+    // Quick voice prompt "Stop" sends urgent STOP + stopMacro + silence synth
+    fireEvent.click(screen.getByRole("button", { name: /“Stop”|"Stop"/i }));
+    expect(onDrive).toHaveBeenCalledWith(0, 0, 200);
+    expect(onStopMacro).toHaveBeenCalledTimes(1);
+    expect(onSynth).toHaveBeenCalledWith(0, 0, 0);
+  });
+});
+
 describe("App multi-tab shell", () => {
-  it("shows Web Bluetooth warning, navigates across all 4 tabs, and unmounts cleanly under StrictMode", () => {
+  it("shows Web Bluetooth warning, navigates across all 5 tabs, and unmounts cleanly under StrictMode", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     const { unmount } = render(
       <React.StrictMode>
@@ -441,6 +523,9 @@ describe("App multi-tab shell", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: /Modes & Macros/i }));
     expect(screen.getByText(/Visual Flash Macro Composer/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Vision & Voice/i }));
+    expect(screen.getByText(/Vision Backpack \(Webcam \/ Phone\)/i)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: /Flasher & Recovery/i }));
     expect(screen.getByText(/Chromebook Web Bluetooth Flasher/i)).toBeTruthy();

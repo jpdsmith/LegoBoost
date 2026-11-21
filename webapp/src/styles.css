@@ -719,6 +719,71 @@ a {
   margin-top: 3px;
 }
 
+/* Phase 5 Vision & Voice Backpack */
+.vision-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 240px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.vision-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.vision-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  text-align: center;
+  font-size: 0.84rem;
+  color: var(--muted);
+  background: var(--surface-inset);
+}
+
+.vision-reticle {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 2px solid var(--accent);
+  background: rgba(56, 189, 248, 0.16);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: left 90ms linear, top 90ms linear;
+}
+
+.vision-reticle-wave {
+  border-color: var(--ok);
+  background: rgba(16, 185, 129, 0.22);
+}
+
+.voice-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.voice-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.text-warn {
+  color: #fde68a !important;
+}
+
 @media (max-width: 680px) {
   .piano-row {
     grid-template-columns: repeat(7, minmax(0, 1fr));
