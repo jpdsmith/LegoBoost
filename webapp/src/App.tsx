@@ -123,13 +123,18 @@ export const App: React.FC = () => {
             Pure-MIT native-C LEGO® BOOST Move Hub firmware · Chromebook Web Bluetooth Controller &amp; Flasher
           </p>
         </div>
-        <span className={`status-dot status-${connState}`}>
-          {connected
-            ? `Connected · ${deviceName}`
-            : connState === "connecting"
-              ? "Pairing…"
-              : "Disconnected"}
-        </span>
+        <div className="action-row">
+          <a className="btn btn-sm btn-ghost" href="./pilot/">
+            Open Vernie Pilot ↗
+          </a>
+          <span className={`status-dot status-${connState}`}>
+            {connected
+              ? `Connected · ${deviceName}`
+              : connState === "connecting"
+                ? "Pairing…"
+                : "Disconnected"}
+          </span>
+        </div>
       </header>
 
       {!bleSupported && (

@@ -37,7 +37,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: webapp/package-lock.json
+          cache-dependency-path: |
+            webapp/package-lock.json
+            webapp-pilot/package-lock.json
 
       - name: Layer 1-3 — Build pure-MIT firmware, run attester gates & ASan/UBSan C tests
         run: |
@@ -49,9 +51,9 @@ jobs:
           /usr/bin/python3 tools/validate_okf.py --strict docs/
           /usr/bin/python3 -m pytest -v tools/tests/
 
-      - name: Stage compiled firmware & verified manifest into Chromebook PWA public bundle
+      - name: Stage compiled firmware & verified manifest into both PWA public bundles
         run: |
-          mkdir -p webapp/public/firmware
+          mkdir -p webapp/public/firmware webapp-pilot/public/firmware
           FW_VERSION=$(sed -n 's/^FW_VERSION[[:space:]]*?=[[:space:]]*//p' firmware/Makefile)
           test -n "${FW_VERSION}"
           echo "Staging firmware version: ${FW_VERSION}"
@@ -69,12 +71,18 @@ jobs:
             --bin webapp/public/firmware/firmware.bin \
             --checksum-size 108544 \
             --receipt webapp/public/firmware/manifest.json
+          cp webapp/public/firmware/* webapp-pilot/public/firmware/
 
-      - name: Layer 4 — Run Vitest (unit + React UI) & build Chromebook Web Bluetooth PWA
+      - name: Layer 4 — Run Vitest & build both Chromebook Web Bluetooth PWAs (Classic Cockpit + Vernie Pilot)
         run: |
           npm --prefix webapp ci
           npm --prefix webapp test
           npm --prefix webapp run build
+          npm --prefix webapp-pilot ci
+          npm --prefix webapp-pilot test
+          npm --prefix webapp-pilot run build
+          rm -rf webapp/dist/pilot
+          cp -r webapp-pilot/dist webapp/dist/pilot
 
       - name: Upload firmware & cockpit artifacts
         uses: actions/upload-artifact@v4

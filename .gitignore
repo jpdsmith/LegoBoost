@@ -2,6 +2,9 @@ firmware/build/
 webapp/node_modules/
 webapp/dist/
 webapp/public/firmware/
+webapp-pilot/node_modules/
+webapp-pilot/dist/
+webapp-pilot/public/firmware/
 __pycache__/
 *.pyc
 .pytest_cache/

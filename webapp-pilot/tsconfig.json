@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["web-bluetooth", "vitest/globals"],
+    "paths": {
+      "@core/*": ["../webapp/src/*"]
+    }
+  },
+  "include": ["src", "../webapp/src/ble/protocol.ts", "../webapp/src/ble/vernieClient.ts", "../webapp/src/ble/lwp3Flasher.ts", "../webapp/src/vision/visionEngine.ts", "../webapp/src/vision/voiceCommands.ts"]
+}
