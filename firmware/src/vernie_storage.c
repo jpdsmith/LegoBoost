@@ -87,14 +87,30 @@ bool vernie_storage_init(vernie_storage_t *st, const vernie_flash_backend_t *bac
 void vernie_storage_mark_dirty(vernie_storage_t *st) {
     if (st) {
         st->dirty = true;
+        st->flush_attempts = 0u;
+        st->next_flush_ms = 0u;
     }
 }
 
-bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active) {
+static void record_flush_failure(vernie_storage_t *st, uint32_t now_ms) {
+    st->flush_attempts++;
+    if (st->flush_attempts >= VERNIE_STORAGE_MAX_FLUSH_ATTEMPTS) {
+        // Give up cleanly after 3 failures to prevent 50 Hz flash wear / BLE lockup on brownout.
+        st->dirty = false;
+    } else {
+        st->next_flush_ms = now_ms + VERNIE_STORAGE_RETRY_BACKOFF_MS;
+    }
+}
+
+bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active, uint32_t now_ms) {
     if (!st || !st->dirty || motors_active) {
         return false;
     }
+    if (st->flush_attempts > 0u && (int32_t)(now_ms - st->next_flush_ms) < 0) {
+        return false;
+    }
     if (st->target_addr != VERNIE_FLASH_USER_1_ADDR || !st->backend.erase_and_write_page) {
+        st->dirty = false;
         return false;
     }
 
@@ -121,6 +137,7 @@ bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active) {
 
     if (!st->backend.erase_and_write_page(
             st->target_addr, &st->blob, sizeof(st->blob), st->backend.ctx)) {
+        record_flush_failure(st, now_ms);
         return false;
     }
 
@@ -129,11 +146,14 @@ bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active) {
         vernie_storage_blob_t verify;
         if (!st->backend.read_page(st->target_addr, &verify, sizeof(verify), st->backend.ctx) ||
             memcmp(&verify, &st->blob, sizeof(verify)) != 0) {
+            record_flush_failure(st, now_ms);
             return false;
         }
     }
 
     st->dirty = false;
+    st->flush_attempts = 0u;
+    st->next_flush_ms = 0u;
     st->loaded_valid = true;
     return true;
 }
@@ -164,6 +184,8 @@ static bool stm32_flash_erase_and_write(uint32_t addr, const void *src, size_t l
     if (HAL_FLASH_Unlock() != HAL_OK) {
         return false;
     }
+    // Clear any stale bootloader/previous error flags so FLASH_WaitForLastOperation doesn't trip.
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_PGERR | FLASH_FLAG_WRPERR);
 
     FLASH_EraseInitTypeDef erase = {
         .TypeErase = FLASH_TYPEERASE_PAGES,

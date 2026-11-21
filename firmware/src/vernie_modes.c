@@ -46,7 +46,8 @@ static void handle_pickup_reflex(vernie_modes_t *m, uint32_t now_ms, vernie_mode
     if (!m->was_picked_up || (uint32_t)(now_ms - m->last_alarm_ms) >= 1200u) {
         m->last_alarm_ms = now_ms;
         out->synth_cmd = true;
-        out->synth_voice = VERNIE_SYNTH_VOICE_BOTH;
+        // C4: tracks are coasted during pickup -> route alarm to TIM1 so head shake (TIM3) never kills it!
+        out->synth_voice = VERNIE_SYNTH_VOICE_TRACKS;
         out->synth_preset_or_note = VERNIE_SFX_ALARM_SQUAWK;
     }
 
@@ -76,22 +77,19 @@ static void tick_mode_pet(vernie_modes_t *m, const vernie_mode_input_t *in, uint
         return;
     }
 
-    // Hand close to chest (<= 50%): playful backup + curious beep!
+    // Hand close to chest (<= 50%): playful backup + curious beep on free Head voice (no colliding head_cmd!).
     if (in->sensor_ok && in->distance_pct <= 50u && (uint32_t)(now_ms - m->sub_enter_ms) >= 1200u) {
         enter_sub(m, VERNIE_PET_BACKING, now_ms);
         out->drive_active = true;
         out->drive_left = -35;
         out->drive_right = -35;
-        out->head_cmd = true;
-        out->head_angle_deg = 20;
-        out->head_speed = 60u;
         out->synth_cmd = true;
-        out->synth_voice = VERNIE_SYNTH_VOICE_BOTH;
+        out->synth_voice = VERNIE_SYNTH_VOICE_HEAD;
         out->synth_preset_or_note = VERNIE_SFX_CURIOUS_BEEP;
         return;
     }
 
-    // Periodic curious head look & chirp every 4.5 seconds.
+    // Periodic curious head look & chirp every 4.5 seconds (tracks idle -> chirp on TIM1 while head looks!).
     if ((uint32_t)(now_ms - m->last_idle_act_ms) >= 4500u) {
         static const int8_t k_looks[4] = { -25, 0, 25, 0 };
         m->last_idle_act_ms = now_ms;
@@ -102,7 +100,7 @@ static void tick_mode_pet(vernie_modes_t *m, const vernie_mode_input_t *in, uint
         out->head_speed = 40u;
         if ((m->idle_step & 1u) != 0u) {
             out->synth_cmd = true;
-            out->synth_voice = VERNIE_SYNTH_VOICE_BOTH;
+            out->synth_voice = VERNIE_SYNTH_VOICE_TRACKS;
             out->synth_preset_or_note = VERNIE_SFX_HAPPY_CHIRP;
         }
     }
@@ -137,8 +135,9 @@ static void tick_mode_explorer(vernie_modes_t *m, const vernie_mode_input_t *in,
                 out->drive_right = -40;
                 return;
             }
-            m->scan_dist_left = 0xFFu;
-            m->scan_dist_right = 0xFFu;
+            // Initialize to 0 (blocked/unknown) so a missing reading never outscores a valid clear distance!
+            m->scan_dist_left = 0u;
+            m->scan_dist_right = 0u;
             enter_sub(m, VERNIE_EXP_SCAN_LEFT, now_ms);
             out->head_cmd = true;
             out->head_angle_deg = -35;
@@ -219,7 +218,7 @@ static void tick_mode_sentry(vernie_modes_t *m, const vernie_mode_input_t *in, u
                 m->target_seen_since_ms = now_ms;
                 enter_sub(m, VERNIE_SEN_ALERT, now_ms);
                 out->synth_cmd = true;
-                out->synth_voice = VERNIE_SYNTH_VOICE_BOTH;
+                out->synth_voice = VERNIE_SYNTH_VOICE_TRACKS;
                 out->synth_preset_or_note = VERNIE_SFX_WARNING_SIREN;
                 return;
             }
@@ -248,13 +247,10 @@ static void tick_mode_sentry(vernie_modes_t *m, const vernie_mode_input_t *in, u
                     out->synth_voice = VERNIE_SYNTH_VOICE_TRACKS;
                     out->synth_preset_or_note = VERNIE_SFX_LASER_ZAP;
                 } else {
-                    // Disarmed default: dramatic warning wiggle + laser SFX, NEVER triggers launcher!
+                    // Disarmed default: dramatic track wiggle + laser SFX on Head voice (no colliding head_cmd!).
                     m->sentry_fired_dart = false;
-                    out->head_cmd = true;
-                    out->head_angle_deg = -35;
-                    out->head_speed = 80u;
                     out->synth_cmd = true;
-                    out->synth_voice = VERNIE_SYNTH_VOICE_BOTH;
+                    out->synth_voice = VERNIE_SYNTH_VOICE_HEAD;
                     out->synth_preset_or_note = VERNIE_SFX_LASER_ZAP;
                 }
             }
@@ -325,6 +321,7 @@ static void tick_mode_color_cards(vernie_modes_t *m, const vernie_mode_input_t *
                 out->synth_voice = VERNIE_SYNTH_VOICE_HEAD;
                 out->synth_preset_or_note = VERNIE_SFX_ALARM_SQUAWK;
             } else if (confirmed == VERNIE_LEGO_COLOR_BLUE) {
+                m->last_dance_beat = 0xFFu;
                 enter_sub(m, VERNIE_CARD_BLUE_DANCE, now_ms);
                 out->synth_cmd = true;
                 out->synth_voice = VERNIE_SYNTH_VOICE_HEAD;
@@ -368,7 +365,9 @@ static void tick_mode_color_cards(vernie_modes_t *m, const vernie_mode_input_t *
                 out->drive_active = true;
                 out->drive_left = beat ? 45 : -45;
                 out->drive_right = beat ? -45 : 45;
-                if ((elapsed % 400u) < 25u) {
+                // Wait >= 650 ms so 620 ms Victory chiptune finishes on TIM3 before head nods on beat transitions!
+                if (elapsed >= 650u && beat != m->last_dance_beat) {
+                    m->last_dance_beat = beat;
                     out->head_cmd = true;
                     out->head_angle_deg = beat ? 30 : -30;
                     out->head_speed = 70u;

@@ -95,7 +95,7 @@ describe("TelemetryHud UI safety, Phase 2 hardware diagnostics & Phase 3 Flash M
     const onStopMacro = vi.fn().mockResolvedValue(undefined);
     const onClearMacro = vi.fn().mockResolvedValue(undefined);
 
-    // Armed but NOT homed -> Fire Dart MUST stay disabled!
+    // Armed but NOT homed -> Fire Dart AND head angle buttons/slider MUST stay disabled (C2)!
     const { rerender } = render(
       <TelemetryHud
         {...baseProps}
@@ -113,8 +113,10 @@ describe("TelemetryHud UI safety, Phase 2 hardware diagnostics & Phase 3 Flash M
       />
     );
     expect((screen.getByRole("button", { name: /Fire Dart/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "+35°" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/Head target angle/i) as HTMLInputElement).disabled).toBe(true);
 
-    // Armed AND Homed -> Fire Dart enabled + all live badges rendered!
+    // Armed AND Homed -> Fire Dart + Head angle controls enabled + all live badges rendered!
     rerender(
       <TelemetryHud
         {...baseProps}
@@ -149,6 +151,9 @@ describe("TelemetryHud UI safety, Phase 2 hardware diagnostics & Phase 3 Flash M
     fireEvent.click(screen.getByRole("button", { name: /Home Head/i }));
     expect(onHead).toHaveBeenCalledWith(HEAD_HOME_SENTINEL, 30);
 
+    fireEvent.change(screen.getByLabelText(/Head target angle/i), { target: { value: "20" } });
+    expect(onHead).toHaveBeenCalledWith(20, 50, true);
+
     fireEvent.click(screen.getByRole("button", { name: /Fire Dart/i }));
     expect(onDartSubcmd).toHaveBeenCalledWith(DartSubcmd.FIRE);
 
@@ -180,6 +185,11 @@ describe("TelemetryHud UI safety, Phase 2 hardware diagnostics & Phase 3 Flash M
 
     fireEvent.click(screen.getByRole("button", { name: /Clear Flash Macro/i }));
     await waitFor(() => expect(onClearMacro).toHaveBeenCalledTimes(1));
+
+    // I6: Disconnecting clears stale macroStatus & resets headSlider to 0°!
+    rerender(<TelemetryHud {...baseProps} connectionState="disconnected" telemetry={null} />);
+    expect(screen.queryByText(/Cleared saved macro/i)).toBeNull();
+    expect((screen.getByLabelText(/Head target angle/i) as HTMLInputElement).value).toBe("0");
   });
 });
 

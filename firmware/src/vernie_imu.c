@@ -174,6 +174,8 @@ void vernie_imu_process_sample(
     if ((click_src & LIS3DH_CLICK_SRC_DCLICK) != 0u && stationary_long_enough && !imu->picked_up) {
         imu->tap_event = true;
         imu->tap_hold_until_ms = now_ms + 300u;
+    } else if (imu->tap_hold_until_ms != 0u && (int32_t)(now_ms - imu->tap_hold_until_ms) >= 0) {
+        imu->tap_hold_until_ms = 0u;
     }
 }
 
@@ -238,6 +240,10 @@ static void stm32_spi1_ensure_init(void) {
     RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
     RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
 
+    // Configure PA4-PA7 high-speed OSPEEDR (0b11 per pin) for clean 3 MHz SCK edges.
+    GPIOA->OSPEEDR |= (3u << (4u * 2u)) | (3u << (5u * 2u)) |
+                      (3u << (6u * 2u)) | (3u << (7u * 2u));
+
     pbdrv_gpio_out_high(&k_spi1_cs);
     pbdrv_gpio_alt(&k_spi1_sck, 0);
     pbdrv_gpio_alt(&k_spi1_miso, 0);
@@ -251,6 +257,12 @@ static void stm32_spi1_ensure_init(void) {
                 SPI_CR1_CPOL | SPI_CR1_CPHA | SPI_CR1_BR_1 | SPI_CR1_BR_0;
     SPI1->CR1 |= SPI_CR1_SPE;
     g_spi1_initialized = true;
+}
+
+static void stm32_spi1_drain_rx(void) {
+    for (uint8_t i = 0u; i < 8u && (SPI1->SR & SPI_SR_RXNE) != 0u; i++) {
+        (void)*(__IO uint8_t *)&SPI1->DR;
+    }
 }
 
 static bool stm32_spi1_xfer_byte(uint8_t tx, uint8_t *rx_out) {
@@ -289,6 +301,7 @@ static bool stm32_spi1_wait_not_busy(void) {
 static bool stm32_lis3dh_write(uint8_t reg, uint8_t val, void *ctx) {
     (void)ctx;
     stm32_spi1_ensure_init();
+    stm32_spi1_drain_rx();
     pbdrv_gpio_out_low(&k_spi1_cs);
     bool ok = stm32_spi1_xfer_byte((uint8_t)(reg & 0x3Fu), NULL) &&
               stm32_spi1_xfer_byte(val, NULL) &&
@@ -300,6 +313,7 @@ static bool stm32_lis3dh_write(uint8_t reg, uint8_t val, void *ctx) {
 static bool stm32_lis3dh_read(uint8_t reg, uint8_t *buf, size_t len, void *ctx) {
     (void)ctx;
     stm32_spi1_ensure_init();
+    stm32_spi1_drain_rx();
     uint8_t cmd = (uint8_t)(LIS3DH_SPI_READ | (len > 1u ? LIS3DH_SPI_AUTOINC : 0u) | (reg & 0x3Fu));
     pbdrv_gpio_out_low(&k_spi1_cs);
     bool ok = stm32_spi1_xfer_byte(cmd, NULL);

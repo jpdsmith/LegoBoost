@@ -183,15 +183,18 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
     }
 
     switch (cmd->opcode) {
-        case VERNIE_OP_DRIVE:
-            if (st->safe_mode) {
+        case VERNIE_OP_DRIVE: {
+            bool is_stop = (cmd->u.drive.left == 0 && cmd->u.drive.right == 0);
+            if (st->safe_mode && !is_stop) {
                 return VERNIE_PARSE_ERR_INTERLOCK;
             }
             st->drive_left = cmd->u.drive.left;
             st->drive_right = cmd->u.drive.right;
-            st->drive_active = (cmd->u.drive.left != 0 || cmd->u.drive.right != 0);
+            st->drive_active = !is_stop;
+            st->manual_drive_received = true;
             st->drive_deadline_ms = now_ms + cmd->u.drive.timeout_ms;
             return VERNIE_PARSE_OK;
+        }
 
         case VERNIE_OP_HEAD:
             if (st->safe_mode) {
@@ -263,24 +266,38 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
             st->led_override = false;
             return VERNIE_PARSE_OK;
 
-        case VERNIE_OP_SYNTH:
+        case VERNIE_OP_SYNTH: {
             if (cmd->u.synth.voice > 2u) {
                 return VERNIE_PARSE_ERR_VALUE;
             }
-            if (st->safe_mode) {
+            bool is_stop = (cmd->u.synth.preset_or_note == 0u);
+            if (st->safe_mode && !is_stop) {
                 return VERNIE_PARSE_ERR_INTERLOCK;
             }
             st->synth_cmd_pending = true;
             st->synth_voice = cmd->u.synth.voice;
             st->synth_preset_or_note = cmd->u.synth.preset_or_note;
             st->synth_dur_ms = cmd->u.synth.dur_ms;
+            if (is_stop) {
+                st->synth_q_count = 1u;
+                st->synth_q_voice[0] = cmd->u.synth.voice;
+                st->synth_q_note[0] = 0u;
+                st->synth_q_dur[0] = 0u;
+            } else {
+                uint8_t idx = st->synth_q_count < 2u ? st->synth_q_count++ : 1u;
+                st->synth_q_voice[idx] = cmd->u.synth.voice;
+                st->synth_q_note[idx] = cmd->u.synth.preset_or_note;
+                st->synth_q_dur[idx] = cmd->u.synth.dur_ms;
+            }
             return VERNIE_PARSE_OK;
+        }
 
-        case VERNIE_OP_MACRO_OP:
+        case VERNIE_OP_MACRO_OP: {
             if (cmd->u.macro_op.data_len > VERNIE_MACRO_CHUNK_MAX) {
                 return VERNIE_PARSE_ERR_LENGTH;
             }
-            if (st->safe_mode) {
+            bool is_stop = (cmd->u.macro_op.subcmd == 3u); // VERNIE_MACRO_SUB_STOP
+            if (st->safe_mode && !is_stop) {
                 return VERNIE_PARSE_ERR_INTERLOCK;
             }
             st->macro_cmd_pending = true;
@@ -291,6 +308,7 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
                 memcpy(st->macro_data, cmd->u.macro_op.data, cmd->u.macro_op.data_len);
             }
             return VERNIE_PARSE_OK;
+        }
 
         default:
             return VERNIE_PARSE_ERR_OPCODE;
@@ -316,6 +334,7 @@ void vernie_control_on_disconnect(vernie_control_state_t *st) {
         return;
     }
     st->drive_active = false;
+    st->manual_drive_received = false;
     st->drive_left = 0;
     st->drive_right = 0;
     st->head_home_requested = false;
@@ -323,6 +342,7 @@ void vernie_control_on_disconnect(vernie_control_state_t *st) {
     st->dart_armed = false;
     st->dart_fire_requested = false;
     st->synth_cmd_pending = false;
+    st->synth_q_count = 0u;
     st->macro_cmd_pending = false;
     st->led_override = false;
     if (st->mode_id == VERNIE_MODE_REMOTE) {

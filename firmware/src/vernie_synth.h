@@ -87,6 +87,8 @@ typedef struct {
     vernie_synth_voice_t voices[2]; // [0] = TIM1 (voice 1), [1] = TIM3 (voice 2)
     vernie_head_port_t head_port;
     bool sibling_safe_for_tim3;
+    bool tracks_busy;
+    bool head_busy;
     uint8_t default_volume_pct;
     vernie_synth_hal_t hal;
 } vernie_synth_t;
@@ -96,13 +98,13 @@ typedef struct {
  * Guarantees:
  *   - 110..4000 Hz within +/-0.5% accuracy (typically < 0.05%)
  *   - PSC <= 65535, ARR <= 65535
- *   - ccr1 <= 0.15 * ARR, ccr2 == ARR - ccr1 (exact 0 V DC creep-free symmetry)
- *   - Dead-band (ccr2 - ccr1) >= 0.70 * ARR
+ *   - ccr1 <= 0.15 * (ARR + 1), ccr2 == (ARR + 1) - ccr1 (exact 0.0 V DC creep-free symmetry)
+ *   - Dead-band (ccr2 - ccr1) >= 0.70 * (ARR + 1)
  */
 bool vernie_synth_calc_pwm(uint16_t freq_hz, uint8_t volume_pct, vernie_synth_pwm_t *out);
 
 /**
- * Convert MIDI note number (45=A2 .. 108=C8) to integer Hz (0 if out of range).
+ * Convert MIDI note number (45=A2 .. 107=B7) to integer Hz (0 if out of range).
  */
 uint16_t vernie_midi_to_hz(uint8_t midi_note);
 
@@ -115,9 +117,15 @@ void vernie_synth_init(vernie_synth_t *s, const vernie_synth_hal_t *hal, uint8_t
 void vernie_synth_set_head_port(vernie_synth_t *s, vernie_head_port_t port, bool sibling_safe);
 
 /**
+ * Inform synth whether track motors or head motor (homing/dart/positioning) are actively busy,
+ * preventing synth acquisition from hijacking active motors or corrupting head homing.
+ */
+void vernie_synth_set_busy(vernie_synth_t *s, bool tracks_busy, bool head_busy);
+
+/**
  * Handle a 0x04 SYNTH command:
  *   - voice == 0 && preset_or_note == 0: stop both voices immediately
- *   - voice == 0 && preset_or_note in 1..8: play R2-D2 preset on best available voice (TIM3 or TIM1)
+ *   - voice == 0 && preset_or_note in 1..8: play R2-D2 preset on best free voice (TIM3 or TIM1)
  *   - voice in 1..2 && preset_or_note == 0: stop that voice
  *   - voice in 1..2 && preset_or_note in 1..31: play preset on that voice
  *   - voice in 1..2 && preset_or_note >= 32: play MIDI note for dur_ms (clamped <= 3000 ms)

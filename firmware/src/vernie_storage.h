@@ -51,10 +51,15 @@ typedef struct {
     void *ctx;
 } vernie_flash_backend_t;
 
+#define VERNIE_STORAGE_MAX_FLUSH_ATTEMPTS (3u)
+#define VERNIE_STORAGE_RETRY_BACKOFF_MS   (1000u)
+
 typedef struct {
     vernie_storage_blob_t blob;
     bool loaded_valid;
     bool dirty;
+    uint8_t flush_attempts;
+    uint32_t next_flush_ms;
     uint32_t target_addr;
     vernie_flash_backend_t backend;
 } vernie_storage_t;
@@ -80,10 +85,11 @@ bool vernie_storage_init(vernie_storage_t *st, const vernie_flash_backend_t *bac
 void vernie_storage_mark_dirty(vernie_storage_t *st);
 
 /**
- * Attempt to flush dirty staging blob to FLASH_USER_1.
+ * Attempt to flush dirty staging blob to FLASH_USER_1 with bounded retry backoff (max 3 attempts
+ * spaced >= 1000 ms to prevent 50 Hz flash-wear/BLE-lockup loops on brownout).
  * Defers (returns false) whenever motors_active == true so flash erase stall never disrupts motion.
  */
-bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active);
+bool vernie_storage_try_flush(vernie_storage_t *st, bool motors_active, uint32_t now_ms);
 
 #ifndef VERNIE_HOST_TEST
 vernie_flash_backend_t vernie_storage_stm32_backend(void);

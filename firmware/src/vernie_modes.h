@@ -74,9 +74,10 @@ typedef struct {
     bool sentry_led_on;
     bool sentry_fired_dart;
     uint32_t sentry_blink_ms;
-    // Color-card 250 ms close-range debounce
+    // Color-card 250 ms close-range debounce & dance beat edge
     uint8_t candidate_color;
     uint32_t candidate_since_ms;
+    uint8_t last_dance_beat;
     // Pickup transition edge tracking
     bool was_picked_up;
 } vernie_modes_t;

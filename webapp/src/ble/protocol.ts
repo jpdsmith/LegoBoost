@@ -225,7 +225,13 @@ export function encodeMacroSteps(steps: MacroStep[]): Uint8Array {
       buf[off + 2] = clamp(step.arg1, 0, 255, 0);
       durMax = 3000;
     } else if (step.op === MacroStepOp.LED) {
-      buf[off + 1] = clamp(step.arg0, 0, 1, 0);
+      const target = clamp(step.arg0, 0, 1, 0);
+      if (target === LedTarget.CHEST_4STATE && !VALID_CHEST_LED_STATES.has(step.arg1)) {
+        throw new RangeError(
+          `Invalid macro chest LED state ${step.arg1} at index ${idx}; expected one of 0, 3, 5, 9`
+        );
+      }
+      buf[off + 1] = target;
       buf[off + 2] = clamp(step.arg1, 0, 255, 0);
     } else {
       buf[off + 1] = 0;
@@ -259,6 +265,11 @@ export function splitMacroIntoChunks(
 export function encodeMacroChunk(subcmd: number, offset: number, data: Uint8Array): Uint8Array {
   if (data.length > MACRO_CHUNK_MAX_DATA_BYTES) {
     throw new RangeError(`Macro chunk exceeds ${MACRO_CHUNK_MAX_DATA_BYTES} bytes`);
+  }
+  if (!Number.isInteger(offset) || offset < 0 || offset + data.length > MACRO_MAX_BYTES) {
+    throw new RangeError(
+      `Macro chunk range [${offset}, ${offset + data.length}) exceeds ${MACRO_MAX_BYTES} bytes`
+    );
   }
   const buf = new Uint8Array(3 + data.length);
   buf[0] = Opcode.MACRO_OP;

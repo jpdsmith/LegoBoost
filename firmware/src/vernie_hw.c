@@ -11,6 +11,7 @@
 #include <pbdrv/battery.h>
 #include <pbio/battery.h>
 #include <pbio/control.h>
+#include <pbio/dcmotor.h>
 #include <pbio/error.h>
 #include <pbio/observer.h>
 #include <pbio/port.h>
@@ -63,6 +64,7 @@ void vernie_head_fsm_step(
     vernie_head_fsm_t *fsm,
     bool head_present,
     bool safe_mode,
+    bool picked_up,
     bool motor_done,
     bool motor_stalled,
     bool home_requested,
@@ -81,7 +83,7 @@ void vernie_head_fsm_step(
             fsm->state = fsm->homed ? VERNIE_HEAD_STATE_READY : VERNIE_HEAD_STATE_UNHOMED;
             act->kind = VERNIE_HEAD_ACT_COAST;
         }
-        if (safe_mode) {
+        if (safe_mode || !head_present) {
             act->clear_head_home_req = home_requested;
             act->clear_head_cmd_pending = angle_cmd_pending;
             act->clear_dart_fire_req = dart_fire_requested;
@@ -91,9 +93,13 @@ void vernie_head_fsm_step(
 
     int32_t move_speed = ((int32_t)(speed_pct < 10u ? 10u : (speed_pct > 100u ? 100u : speed_pct)) * 600) / 100;
 
-    // Handle active multi-step states first.
+    // Handle active multi-step states first; ALWAYS clear premature incoming requests (C3) so
+    // dart fire or home requests arriving mid-sequence never stay latched!
     switch (fsm->state) {
         case VERNIE_HEAD_STATE_HOMING_SEEK: {
+            act->clear_dart_fire_req = dart_fire_requested;
+            act->clear_head_home_req = home_requested;
+            act->clear_head_cmd_pending = angle_cmd_pending;
             bool timed_out = (uint32_t)(now_ms - fsm->state_enter_ms) >= VERNIE_HEAD_HOME_TIMEOUT_MS;
             if (motor_done || motor_stalled || timed_out) {
                 fsm->state = VERNIE_HEAD_STATE_HOMING_BACKOFF;
@@ -106,6 +112,9 @@ void vernie_head_fsm_step(
         }
 
         case VERNIE_HEAD_STATE_HOMING_BACKOFF: {
+            act->clear_dart_fire_req = dart_fire_requested;
+            act->clear_head_home_req = home_requested;
+            act->clear_head_cmd_pending = angle_cmd_pending;
             bool timed_out = (uint32_t)(now_ms - fsm->state_enter_ms) >= VERNIE_HEAD_BACKOFF_TIMEOUT_MS;
             if (motor_done || timed_out) {
                 fsm->state = VERNIE_HEAD_STATE_READY;
@@ -116,6 +125,17 @@ void vernie_head_fsm_step(
         }
 
         case VERNIE_HEAD_STATE_DART_FIRING: {
+            act->clear_dart_fire_req = dart_fire_requested;
+            act->clear_head_home_req = home_requested;
+            act->clear_head_cmd_pending = angle_cmd_pending;
+            // I5 safety: immediately abort & disarm dart sweep if Vernie is picked up!
+            if (picked_up) {
+                fsm->state = VERNIE_HEAD_STATE_READY;
+                act->kind = VERNIE_HEAD_ACT_COAST;
+                act->clear_dart_armed = true;
+                act->clear_dart_fire_req = true;
+                return;
+            }
             bool timed_out = (uint32_t)(now_ms - fsm->state_enter_ms) >= 1200u;
             if (motor_done || motor_stalled || timed_out) {
                 fsm->state = VERNIE_HEAD_STATE_DART_HOLD;
@@ -125,6 +145,9 @@ void vernie_head_fsm_step(
         }
 
         case VERNIE_HEAD_STATE_DART_HOLD: {
+            act->clear_dart_fire_req = dart_fire_requested;
+            act->clear_head_home_req = home_requested;
+            act->clear_head_cmd_pending = angle_cmd_pending;
             if ((uint32_t)(now_ms - fsm->state_enter_ms) >= VERNIE_DART_HOLD_MS) {
                 fsm->state = VERNIE_HEAD_STATE_DART_RETURNING;
                 fsm->state_enter_ms = now_ms;
@@ -136,6 +159,9 @@ void vernie_head_fsm_step(
         }
 
         case VERNIE_HEAD_STATE_DART_RETURNING: {
+            act->clear_dart_fire_req = dart_fire_requested;
+            act->clear_head_home_req = home_requested;
+            act->clear_head_cmd_pending = angle_cmd_pending;
             bool timed_out = (uint32_t)(now_ms - fsm->state_enter_ms) >= 1200u;
             if (motor_done || timed_out) {
                 fsm->state = VERNIE_HEAD_STATE_READY;
@@ -161,11 +187,12 @@ void vernie_head_fsm_step(
         act->speed_deg_s = VERNIE_HEAD_HOME_SPEED_DEG_S; // Strictly negative (non-trigger)!
         act->duty_limit_pct = VERNIE_HEAD_HOME_DUTY_PCT; // <= 30% duty!
         act->clear_head_home_req = true;
+        act->clear_dart_fire_req = dart_fire_requested;
         return;
     }
 
     if (dart_fire_requested) {
-        if (dart_armed && fsm->homed) {
+        if (dart_armed && fsm->homed && !picked_up) {
             fsm->state = VERNIE_HEAD_STATE_DART_FIRING;
             fsm->state_enter_ms = now_ms;
             act->kind = VERNIE_HEAD_ACT_FIRE_SWEEP;
@@ -174,13 +201,17 @@ void vernie_head_fsm_step(
             act->clear_dart_fire_req = true;
             return;
         }
-        // Reject fire if disarmed or head is not yet homed!
+        // Reject fire if disarmed, unhomed, or picked up!
         act->clear_dart_fire_req = true;
         return;
     }
 
     if (angle_cmd_pending) {
         act->clear_head_cmd_pending = true;
+        // C2 safety: NEVER command relative target angles until homed (prevents accidental dart trigger!).
+        if (!fsm->homed) {
+            return;
+        }
         int8_t clamped = clamp_i8(target_deg, VERNIE_HEAD_MIN_DEG, VERNIE_HEAD_MAX_DEG);
         fsm->last_cmd_deg = clamped;
         act->kind = VERNIE_HEAD_ACT_MOVE_TARGET;
@@ -190,12 +221,18 @@ void vernie_head_fsm_step(
 }
 
 void vernie_sensor_decode_spec1(const int8_t raw[4], uint8_t *color_id_out, uint8_t *distance_pct_out) {
-    // 88007 SPEC1 (mode 8): raw[0] = LEGO color ID (0..10 or -1=none), raw[1] = proximity 0..10
+    // 88007 SPEC1 (mode 8): raw[0] = LEGO color ID (0..10 or -1=none), raw[1] = proximity 0..10 (or <0=N/A)
     uint8_t col = (raw[0] >= 0 && raw[0] <= 10) ? (uint8_t)raw[0] : 0u;
     int32_t prox = (int32_t)raw[1];
-    if (prox < 0) prox = 0;
-    if (prox > 10) prox = 10;
-    uint8_t dist_pct = (uint8_t)(prox * 10);
+    uint8_t dist_pct;
+    if (prox < 0) {
+        // I4: Out-of-range / invalid negative sentinel MUST NOT clamp to 0% (touching obstacle)!
+        dist_pct = 0xFFu;
+    } else if (prox > 10) {
+        dist_pct = 100u;
+    } else {
+        dist_pct = (uint8_t)(prox * 10);
+    }
 
     if (color_id_out) {
         *color_id_out = col;
@@ -216,6 +253,7 @@ static int16_t clamp_i16(int32_t v) {
     return (int16_t)v;
 }
 
+static vernie_hw_t *g_hw_inst = NULL;
 static pbio_servo_t *g_srv_a = NULL;
 static pbio_servo_t *g_srv_b = NULL;
 static pbio_servo_t *g_srv_head = NULL;
@@ -227,6 +265,13 @@ void vernie_hw_coast_tracks(void) {
     }
     if (g_srv_b) {
         (void)pbio_servo_stop(g_srv_b, PBIO_CONTROL_ON_COMPLETION_COAST);
+    }
+    // C4: clear cached drive state so vernie_hw_step() always re-engages tracks after any coast.
+    if (g_hw_inst) {
+        g_hw_inst->tracks_active = false;
+        g_hw_inst->last_drive_active = false;
+        g_hw_inst->last_drive_left = 0;
+        g_hw_inst->last_drive_right = 0;
     }
 }
 
@@ -249,6 +294,7 @@ void vernie_hw_coast_all(vernie_hw_t *hw) {
 
 static vernie_ext_dev_kind_t probe_external_port(
     pbio_port_id_t port_id,
+    vernie_ext_dev_kind_t prev_kind,
     pbio_servo_t **srv_out,
     pbio_port_lump_dev_t **lump_out
 ) {
@@ -259,19 +305,37 @@ static vernie_ext_dev_kind_t probe_external_port(
 
     lego_device_type_id_t motor_type = LEGO_DEVICE_TYPE_ID_INTERACTIVE_MOTOR;
     pbio_servo_t *srv = NULL;
-    if (pbio_port_get_servo(port, &motor_type, &srv) == PBIO_SUCCESS) {
+    pbio_error_t m_err = pbio_port_get_servo(port, &motor_type, &srv);
+    if (m_err == PBIO_SUCCESS) {
         if (srv_out) *srv_out = srv;
+        return VERNIE_EXT_DEV_HEAD;
+    }
+    if (m_err == PBIO_ERROR_AGAIN && prev_kind == VERNIE_EXT_DEV_HEAD) {
         return VERNIE_EXT_DEV_HEAD;
     }
 
     lego_device_type_id_t sensor_type = LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR;
     pbio_port_lump_dev_t *lump = NULL;
-    if (pbio_port_get_lump_device(port, &sensor_type, &lump) == PBIO_SUCCESS) {
+    pbio_error_t s_err = pbio_port_get_lump_device(port, &sensor_type, &lump);
+    if (s_err == PBIO_SUCCESS) {
         if (lump_out) *lump_out = lump;
+        return VERNIE_EXT_DEV_SENSOR;
+    }
+    // C1: preserve 88007 attachment across 10-50 ms LUMP mode-switch PBIO_ERROR_AGAIN windows!
+    if (s_err == PBIO_ERROR_AGAIN && prev_kind == VERNIE_EXT_DEV_SENSOR) {
         return VERNIE_EXT_DEV_SENSOR;
     }
 
     return VERNIE_EXT_DEV_NONE;
+}
+
+static void close_head_servo(vernie_hw_t *hw) {
+    if (g_srv_head) {
+        // C1: release dcmotor->parent so subsequent pbio_servo_setup() never returns PBIO_ERROR_BUSY!
+        (void)pbio_dcmotor_close(g_srv_head->dcmotor);
+        g_srv_head = NULL;
+    }
+    hw->head_ready = false;
 }
 
 static void probe_all_ports(vernie_hw_t *hw, vernie_synth_t *synth) {
@@ -295,34 +359,53 @@ static void probe_all_ports(vernie_hw_t *hw, vernie_synth_t *synth) {
         }
     }
 
-    // External Ports C & D auto-detection.
+    // External Ports C & D auto-detection (preserving transient PBIO_ERROR_AGAIN states).
     pbio_servo_t *srv_c = NULL, *srv_d = NULL;
     pbio_port_lump_dev_t *lump_c = NULL, *lump_d = NULL;
-    vernie_ext_dev_kind_t kc = probe_external_port(PBIO_PORT_ID_C, &srv_c, &lump_c);
-    vernie_ext_dev_kind_t kd = probe_external_port(PBIO_PORT_ID_D, &srv_d, &lump_d);
+    vernie_ext_dev_kind_t kc = probe_external_port(PBIO_PORT_ID_C, hw->last_port_c, &srv_c, &lump_c);
+    vernie_ext_dev_kind_t kd = probe_external_port(PBIO_PORT_ID_D, hw->last_port_d, &srv_d, &lump_d);
+    hw->last_port_c = kc;
+    hw->last_port_d = kd;
 
     vernie_port_map_t next_map;
     vernie_hw_resolve_ports(kc, kd, &next_map);
 
-    if (next_map.head_port != hw->ports.head_port) {
-        hw->head_ready = false;
-        g_srv_head = (next_map.head_port == VERNIE_HEAD_PORT_C) ? srv_c :
-                     (next_map.head_port == VERNIE_HEAD_PORT_D) ? srv_d : NULL;
-        if (g_srv_head &&
-            pbio_servo_setup(g_srv_head, LEGO_DEVICE_TYPE_ID_INTERACTIVE_MOTOR,
-                             PBIO_DIRECTION_CLOCKWISE, 1000, true, 0) == PBIO_SUCCESS) {
-            hw->head_ready = true;
-        }
+    // C1: Detect dead update loop after transient unplug/LUMP glitch so head re-initializes cleanly.
+    if (hw->head_ready && g_srv_head && !pbio_servo_update_loop_is_running(g_srv_head)) {
+        close_head_servo(hw);
         vernie_head_fsm_init(&hw->head_fsm, hw->head_fsm.home_offset_deg);
+    }
+
+    bool head_port_changed = (next_map.head_port != hw->ports.head_port);
+    if (head_port_changed) {
+        close_head_servo(hw);
+        vernie_head_fsm_init(&hw->head_fsm, hw->head_fsm.home_offset_deg);
+    }
+
+    // C1: Retry head setup whenever port is present and !hw->head_ready (never permanently stranded!).
+    if (next_map.head_port != VERNIE_HEAD_PORT_NONE && !hw->head_ready) {
+        pbio_servo_t *cand = (next_map.head_port == VERNIE_HEAD_PORT_C) ? srv_c : srv_d;
+        if (cand != NULL) {
+            (void)pbio_dcmotor_close(cand->dcmotor);
+            if (pbio_servo_setup(cand, LEGO_DEVICE_TYPE_ID_INTERACTIVE_MOTOR,
+                                 PBIO_DIRECTION_CLOCKWISE, 1000, true, 0) == PBIO_SUCCESS) {
+                g_srv_head = cand;
+                hw->head_ready = true;
+                vernie_head_fsm_init(&hw->head_fsm, hw->head_fsm.home_offset_deg);
+            }
+        }
     }
 
     if (next_map.sensor_port != hw->ports.sensor_port) {
         g_lump_sensor = (next_map.sensor_port == VERNIE_HEAD_PORT_C) ? lump_c :
                         (next_map.sensor_port == VERNIE_HEAD_PORT_D) ? lump_d : NULL;
         hw->sensor_mode_selected = false;
+        hw->sensor.chest_led_mode = false;
         hw->sensor.sensor_ok = (g_lump_sensor != NULL);
         hw->sensor.distance_pct = 0xFFu;
         hw->sensor.color_id = 0u;
+    } else if (next_map.sensor_port != VERNIE_HEAD_PORT_NONE && g_lump_sensor == NULL) {
+        g_lump_sensor = (next_map.sensor_port == VERNIE_HEAD_PORT_C) ? lump_c : lump_d;
     }
 
     hw->ports = next_map;
@@ -333,6 +416,7 @@ static void probe_all_ports(vernie_hw_t *hw, vernie_synth_t *synth) {
 
 void vernie_hw_init(vernie_hw_t *hw, int16_t head_home_offset_deg) {
     memset(hw, 0, sizeof(*hw));
+    g_hw_inst = hw;
     g_srv_a = NULL;
     g_srv_b = NULL;
     g_srv_head = NULL;
@@ -384,10 +468,6 @@ void vernie_hw_step(
         hw->tracks_active = true;
     } else if (hw->last_drive_active) {
         vernie_hw_coast_tracks();
-        hw->last_drive_active = false;
-        hw->last_drive_left = 0;
-        hw->last_drive_right = 0;
-        hw->tracks_active = false;
     }
 
     // 2. Head Motor Homing, Positioning & Armed-Only Dart Launcher FSM.
@@ -404,6 +484,7 @@ void vernie_hw_step(
         &hw->head_fsm,
         hw->head_ready && g_srv_head != NULL,
         ctrl->safe_mode,
+        picked_up,
         head_done,
         head_stalled,
         ctrl->head_home_requested,
@@ -477,6 +558,7 @@ void vernie_hw_step(
                         1u) == PBIO_SUCCESS) {
                     hw->sensor.chest_led_mode = true;
                     hw->sensor.active_chest_led = ctrl->chest_led;
+                    hw->sensor.sensor_ok = false; // I5: sensing disabled while in COL_O LED mode!
                     hw->sensor.distance_pct = 0xFFu;
                     hw->sensor.color_id = 0u;
                     hw->sensor_mode_selected = true;
@@ -530,8 +612,9 @@ void vernie_hw_step(
     snap->head_homed = hw->head_fsm.homed;
     snap->tracks_moving = hw->tracks_active || (spd_a_deg > 30 || spd_a_deg < -30 || spd_b_deg > 30 || spd_b_deg < -30);
     snap->tracks_stalled = hw->tracks_active && (stalled_a || stalled_b);
+    // I3: include active head MOVE_TARGET (!head_done) so flash erase never stalls mid-head-move.
     snap->motors_active = hw->tracks_active ||
-                          (hw->head_fsm.state != VERNIE_HEAD_STATE_UNHOMED &&
-                           hw->head_fsm.state != VERNIE_HEAD_STATE_READY);
+                          vernie_head_fsm_is_busy(&hw->head_fsm) ||
+                          (hw->head_ready && !head_done);
 }
 #endif // !VERNIE_HOST_TEST

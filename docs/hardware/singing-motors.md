@@ -32,10 +32,10 @@ Verified directly from Move Hub `platform.c` (note that `platform.c:270` contain
 
 # Zero-DC-Creep 3-Level Bipolar Physics
 
-Because both LB1836 H-bridge pins of a motor share one STM32 timer, driving `pin1` in non-inverted **PWM Mode 1** (`CCR1 = d`, HIGH on `[0, d)`) and `pin2` in non-inverted **PWM Mode 2** (`CCR2 = ARR - d`, HIGH on `[ARR - d, ARR]`) produces:
-- A symmetrical `-V` pulse of width `d`
-- A coast dead-band of width `ARR - 2d >= 0.70 * ARR` (both pins LOW)
-- An equal `+V` pulse of width `d`
+Because both LB1836 H-bridge pins of a motor share one STM32 timer (`period = ARR + 1` ticks on `CNT ∈ [0, ARR]`), driving `pin1` in non-inverted **PWM Mode 1** (`CCR1 = d`, HIGH on `[0, d - 1]`) and `pin2` in non-inverted **PWM Mode 2** (`CCR2 = (ARR + 1) - d`, HIGH on `[(ARR + 1) - d, ARR]`, initialized to `0xFFFF` on acquire) produces:
+- A symmetrical `-V` pulse of exact width `d` ticks
+- A coast dead-band of width `(ARR + 1) - 2d >= 0.70 * (ARR + 1)` ticks (both pins LOW)
+- An equal `+V` pulse of exact width `d` ticks
 
 Net DC average across the motor coil is **0.0 V**, preventing track creep and head drift while capping half-cycle duty `<= 15%` and continuous tone time `<= 3000 ms` (with mandatory `500 ms` thermal cooldown). Pitch accuracy (`<= 0.5%`, measured `0.00273%` worst-case across MIDI A3–A7) is verified by [PWM Synth Divider Table](../computations/pwm-synth-dividers.md).
 

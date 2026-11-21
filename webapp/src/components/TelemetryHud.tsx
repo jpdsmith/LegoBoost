@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ChestLedState,
   DartSubcmd,
@@ -24,7 +24,7 @@ interface TelemetryHudProps {
   onConnect: () => void;
   onDisconnect: () => void;
   onDrive: (left: number, right: number, timeoutMs?: number) => void;
-  onHead: (angleDeg: number, speed?: number) => void;
+  onHead: (angleDeg: number, speed?: number, coalesce?: boolean) => void;
   onSynth: (voice: number, presetOrNote: number, durMs?: number) => void;
   onSetHubLed: (r: number, g: number, b: number) => void;
   onSetChestLed: (state: number) => void;
@@ -157,6 +157,13 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   const [selectedPresetId, setSelectedPresetId] = useState<string>(MACRO_PRESETS[0].id);
   const [macroBusy, setMacroBusy] = useState(false);
   const [macroStatus, setMacroStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (connectionState === "disconnected") {
+      setHeadSlider(0);
+      setMacroStatus(null);
+    }
+  }, [connectionState]);
 
   const selectedPreset =
     MACRO_PRESETS.find((p) => p.id === selectedPresetId) ?? MACRO_PRESETS[0];
@@ -356,7 +363,9 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         </div>
 
         <div className="diag-row">
-          <span className="label">Head Homing &amp; Angle (0x02, safe -40°..+35°):</span>
+          <span className="label">
+            Head Homing &amp; Angle (0x02, safe -40°..+35° · {headHomed ? "Homed" : "Home Head first"}):
+          </span>
           <div className="swatch-row">
             <button
               className="btn btn-sm btn-secondary"
@@ -368,7 +377,8 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             </button>
             <button
               className="btn btn-sm btn-ghost"
-              disabled={motionControlsDisabled}
+              disabled={motionControlsDisabled || !headHomed}
+              title={headHomed ? "Turn head to -35°" : "Home Head first before positioning"}
               onClick={() => {
                 setHeadSlider(-35);
                 onHead(-35, 50);
@@ -378,7 +388,8 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             </button>
             <button
               className="btn btn-sm btn-ghost"
-              disabled={motionControlsDisabled}
+              disabled={motionControlsDisabled || !headHomed}
+              title={headHomed ? "Center head to 0°" : "Home Head first before positioning"}
               onClick={() => {
                 setHeadSlider(0);
                 onHead(0, 50);
@@ -388,7 +399,8 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             </button>
             <button
               className="btn btn-sm btn-ghost"
-              disabled={motionControlsDisabled}
+              disabled={motionControlsDisabled || !headHomed}
+              title={headHomed ? "Turn head to +35°" : "Home Head first before positioning"}
               onClick={() => {
                 setHeadSlider(35);
                 onHead(35, 50);
@@ -403,11 +415,11 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               min={-40}
               max={35}
               value={headSlider}
-              disabled={motionControlsDisabled}
+              disabled={motionControlsDisabled || !headHomed}
               onChange={(e) => {
                 const deg = Number(e.target.value);
                 setHeadSlider(deg);
-                onHead(deg, 50);
+                onHead(deg, 50, true);
               }}
             />
             <span className="meta">{headSlider}°</span>
@@ -482,7 +494,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
                 key={n.midi}
                 className="btn btn-sm btn-ghost"
                 disabled={motionControlsDisabled}
-                onClick={() => onSynth(synthVoice === 0 ? 1 : synthVoice, n.midi, 280)}
+                onClick={() => onSynth(synthVoice, n.midi, 280)}
               >
                 ♪ {n.label}
               </button>

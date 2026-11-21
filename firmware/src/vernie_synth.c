@@ -10,19 +10,19 @@
 #include <pbdrv/gpio.h>
 #endif
 
-// Exact integer Hz lookup for MIDI notes 45 (A2 = 110 Hz) through 108 (C8 = 4186 Hz).
-static const uint16_t k_midi_hz[64] = {
+// Exact integer Hz lookup for MIDI notes 45 (A2 = 110 Hz) through 107 (B7 = 3951 Hz).
+static const uint16_t k_midi_hz[63] = {
      110,  117,  123,  131,  139,  147,  156,  165,  175,  185,  196,  208, // 45..56 (A2..G#3)
      220,  233,  247,  262,  277,  294,  311,  330,  349,  370,  392,  415, // 57..68 (A3..G#4)
      440,  466,  494,  523,  554,  587,  622,  659,  698,  740,  784,  831, // 69..80 (A4..G#5)
      880,  932,  988, 1047, 1109, 1175, 1245, 1319, 1397, 1480, 1568, 1661, // 81..92 (A5..G#6)
     1760, 1865, 1976, 2093, 2217, 2349, 2489, 2637, 2794, 2960, 3136, 3322, // 93..104 (A6..G#7)
-    3520, 3729, 3951, 4186,                                                 // 105..108 (A7..C8)
+    3520, 3729, 3951,                                                       // 105..107 (A7..B7)
 };
 
 typedef struct {
     uint16_t freq_hz; // 0 = rest (silence without releasing lock)
-    uint16_t dur_ms;
+    uint16_t dur_ms;  // 0 = sequence terminator
     uint8_t vol_pct;
 } vernie_sfx_step_t;
 
@@ -102,7 +102,10 @@ bool vernie_synth_calc_pwm(uint16_t freq_hz, uint8_t volume_pct, vernie_synth_pw
     }
     uint16_t arr = (uint16_t)(period - 1u);
 
-    // Symmetrical 3-level bipolar duty capped strictly <= 15% ARR -> dead-band >= 70% ARR.
+    // Symmetrical 3-level bipolar duty capped strictly <= 15% of period (ARR + 1) -> dead-band >= 70%:
+    //   - Pin 1 (PWM Mode 1, CNT < ccr1):  HIGH for [0, d-1]            = exact d ticks
+    //   - Pin 2 (PWM Mode 2, CNT >= ccr2): HIGH for [period - d, arr]   = exact d ticks
+    //   - Coast dead-band (both LOW):      [d, period - d - 1]          = period - 2*d ticks
     uint8_t vol = volume_pct;
     if (vol == 0u) {
         vol = 1u;
@@ -110,8 +113,8 @@ bool vernie_synth_calc_pwm(uint16_t freq_hz, uint8_t volume_pct, vernie_synth_pw
     if (vol > 100u) {
         vol = 100u;
     }
-    uint32_t max_d = ((uint32_t)arr * VERNIE_SYNTH_MAX_DUTY_PCT) / 100u;
-    uint32_t d = ((uint32_t)arr * (uint32_t)vol * VERNIE_SYNTH_MAX_DUTY_PCT) / 10000u;
+    uint32_t max_d = (period * VERNIE_SYNTH_MAX_DUTY_PCT) / 100u;
+    uint32_t d = (period * (uint32_t)vol * VERNIE_SYNTH_MAX_DUTY_PCT) / 10000u;
     if (d < 1u) {
         d = 1u;
     }
@@ -119,13 +122,13 @@ bool vernie_synth_calc_pwm(uint16_t freq_hz, uint8_t volume_pct, vernie_synth_pw
         d = max_d;
     }
 
-    uint32_t actual_denom = (psc + 1u) * ((uint32_t)arr + 1u);
+    uint32_t actual_denom = (psc + 1u) * period;
     uint32_t actual_hz_x10 = ((VERNIE_SYNTH_CLK_HZ * 10u) + (actual_denom / 2u)) / actual_denom;
 
     out->psc = (uint16_t)psc;
     out->arr = arr;
     out->ccr1 = (uint16_t)d;
-    out->ccr2 = (uint16_t)(arr - d);
+    out->ccr2 = (uint16_t)(period - d);
     out->actual_hz_x10 = actual_hz_x10;
     return true;
 }
@@ -149,6 +152,14 @@ void vernie_synth_set_head_port(vernie_synth_t *s, vernie_head_port_t port, bool
     s->sibling_safe_for_tim3 = sibling_safe;
 }
 
+void vernie_synth_set_busy(vernie_synth_t *s, bool tracks_busy, bool head_busy) {
+    if (!s) {
+        return;
+    }
+    s->tracks_busy = tracks_busy;
+    s->head_busy = head_busy;
+}
+
 static void release_voice_hw(vernie_synth_t *s, uint8_t voice_id) {
     if (voice_id < 1u || voice_id > 2u) {
         return;
@@ -162,7 +173,6 @@ static void release_voice_hw(vernie_synth_t *s, uint8_t voice_id) {
     }
     v->active = false;
     v->in_preset = false;
-    v->continuous_ms = 0u;
 }
 
 void vernie_synth_yield_voice(vernie_synth_t *s, uint8_t voice) {
@@ -181,6 +191,28 @@ void vernie_synth_stop_all(vernie_synth_t *s) {
     vernie_synth_yield_voice(s, VERNIE_SYNTH_VOICE_BOTH);
 }
 
+static bool voice_can_acquire(const vernie_synth_t *s, uint8_t voice_id) {
+    if (voice_id == VERNIE_SYNTH_VOICE_TRACKS) {
+        return !s->tracks_busy;
+    }
+    if (voice_id == VERNIE_SYNTH_VOICE_HEAD) {
+        return s->head_port != VERNIE_HEAD_PORT_NONE && s->sibling_safe_for_tim3 && !s->head_busy;
+    }
+    return false;
+}
+
+static void decay_thermal_while_idle(vernie_synth_voice_t *v, uint32_t now_ms) {
+    if (v->continuous_ms > 0u) {
+        uint32_t dt = now_ms - v->last_tick_ms;
+        if (dt >= v->continuous_ms) {
+            v->continuous_ms = 0u;
+        } else {
+            v->continuous_ms -= dt;
+        }
+    }
+    v->last_tick_ms = now_ms;
+}
+
 static bool voice_start_tone(
     vernie_synth_t *s,
     uint8_t voice_id,
@@ -192,10 +224,8 @@ static bool voice_start_tone(
     if (voice_id < 1u || voice_id > 2u || dur_ms == 0u) {
         return false;
     }
-    if (voice_id == VERNIE_SYNTH_VOICE_HEAD) {
-        if (s->head_port == VERNIE_HEAD_PORT_NONE || !s->sibling_safe_for_tim3) {
-            return false;
-        }
+    if (!voice_can_acquire(s, voice_id)) {
+        return false;
     }
 
     vernie_synth_voice_t *v = &s->voices[voice_id - 1u];
@@ -204,8 +234,28 @@ static bool voice_start_tone(
     }
     v->cooldown_until_ms = 0u;
 
+    // Accumulate thermal time across rapid re-triggers (prevents I1 watchdog bypass),
+    // or decay thermal bucket during silence (prevents back-to-back 2.9s duty-cycle bypass).
+    if (v->active) {
+        v->continuous_ms += (uint32_t)(now_ms - v->last_tick_ms);
+        v->last_tick_ms = now_ms;
+        if (v->continuous_ms >= VERNIE_SYNTH_THERMAL_MAX_MS) {
+            release_voice_hw(s, voice_id);
+            v->continuous_ms = 0u;
+            v->cooldown_until_ms = now_ms + VERNIE_SYNTH_COOLDOWN_MS;
+            return false;
+        }
+    } else {
+        decay_thermal_while_idle(v, now_ms);
+    }
+
     vernie_synth_pwm_t pwm;
-    if (!vernie_synth_calc_pwm(freq_hz, vol_pct, &pwm)) {
+    if (freq_hz == 0u) {
+        memset(&pwm, 0, sizeof(pwm));
+        pwm.arr = 1000u;
+        pwm.ccr1 = 0u;
+        pwm.ccr2 = 0xFFFFu;
+    } else if (!vernie_synth_calc_pwm(freq_hz, vol_pct, &pwm)) {
         return false;
     }
 
@@ -247,12 +297,16 @@ bool vernie_synth_command(
         return true;
     }
 
-    // Voice 0 selects head motor (TIM3) if confirmed & safe, else tracks (TIM1).
+    // Voice 0 (Auto) prefers free Head motor (TIM3), falling back to free Tracks (TIM1).
     uint8_t target_voice = voice;
     if (target_voice == VERNIE_SYNTH_VOICE_BOTH) {
-        target_voice = (s->head_port != VERNIE_HEAD_PORT_NONE && s->sibling_safe_for_tim3)
-                           ? VERNIE_SYNTH_VOICE_HEAD
-                           : VERNIE_SYNTH_VOICE_TRACKS;
+        if (voice_can_acquire(s, VERNIE_SYNTH_VOICE_HEAD)) {
+            target_voice = VERNIE_SYNTH_VOICE_HEAD;
+        } else if (voice_can_acquire(s, VERNIE_SYNTH_VOICE_TRACKS)) {
+            target_voice = VERNIE_SYNTH_VOICE_TRACKS;
+        } else {
+            return false;
+        }
     }
 
     vernie_synth_voice_t *v = &s->voices[target_voice - 1u];
@@ -289,16 +343,21 @@ void vernie_synth_tick(vernie_synth_t *s, uint32_t now_ms) {
         uint8_t voice_id = (uint8_t)(idx + 1u);
         vernie_synth_voice_t *v = &s->voices[idx];
         if (!v->active) {
+            decay_thermal_while_idle(v, now_ms);
             continue;
         }
 
         uint32_t dt = now_ms - v->last_tick_ms;
         v->last_tick_ms = now_ms;
-        v->continuous_ms += dt;
+        // Rest steps (ccr1 == 0) do not heat the coil; active bipolar tones accumulate thermal budget.
+        if (v->current_pwm.ccr1 > 0u) {
+            v->continuous_ms += dt;
+        }
 
         // Hard thermal safety cap (3000 ms continuous -> silence + 500 ms cooldown).
         if (v->continuous_ms >= VERNIE_SYNTH_THERMAL_MAX_MS) {
             release_voice_hw(s, voice_id);
+            v->continuous_ms = 0u;
             v->cooldown_until_ms = now_ms + VERNIE_SYNTH_COOLDOWN_MS;
             continue;
         }
@@ -307,10 +366,20 @@ void vernie_synth_tick(vernie_synth_t *s, uint32_t now_ms) {
             if (v->in_preset) {
                 const vernie_sfx_seq_t *seq = &k_sfx_bank[v->preset_id];
                 uint8_t next_step = (uint8_t)(v->preset_step + 1u);
-                if (next_step < seq->count) {
+                if (next_step < seq->count && seq->steps[next_step].dur_ms > 0u) {
                     const vernie_sfx_step_t *st = &seq->steps[next_step];
                     vernie_synth_pwm_t pwm;
-                    if (st->freq_hz > 0u && vernie_synth_calc_pwm(st->freq_hz, st->vol_pct, &pwm)) {
+                    bool step_ok = false;
+                    if (st->freq_hz == 0u) {
+                        memset(&pwm, 0, sizeof(pwm));
+                        pwm.arr = 1000u;
+                        pwm.ccr1 = 0u;
+                        pwm.ccr2 = 0xFFFFu;
+                        step_ok = true;
+                    } else {
+                        step_ok = vernie_synth_calc_pwm(st->freq_hz, st->vol_pct, &pwm);
+                    }
+                    if (step_ok) {
                         v->preset_step = next_step;
                         v->current_pwm = pwm;
                         v->step_end_ms = now_ms + st->dur_ms;
@@ -322,6 +391,7 @@ void vernie_synth_tick(vernie_synth_t *s, uint32_t now_ms) {
                 }
             }
             release_voice_hw(s, voice_id);
+            v->last_tick_ms = now_ms;
         }
     }
 }
@@ -364,11 +434,12 @@ static bool stm32_synth_acquire(uint8_t voice, vernie_head_port_t head_port, voi
         pbdrv_gpio_out_low(&k_pin_a2);
 
         // CH1 (PA8): PWM Mode 1 (0x68); CH3 (PA10): PWM Mode 2 (0x78), non-inverted.
+        // Mode 2 CCR MUST initialize to 0xFFFF (always LOW) to prevent full-rail pulse before set_pwm!
         TIM1->CCER = 0u;
         TIM1->CCMR1 = (TIM1->CCMR1 & ~0x00FFu) | 0x0068u;
         TIM1->CCMR2 = (TIM1->CCMR2 & ~0x00FFu) | 0x0078u;
         TIM1->CCR1 = 0u;
-        TIM1->CCR3 = 0u;
+        TIM1->CCR3 = 0xFFFFu;
         TIM1->CCER = TIM_CCER_CC1E | TIM_CCER_CC3E;
         TIM1->BDTR |= TIM_BDTR_MOE;
         TIM1->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
@@ -390,11 +461,11 @@ static bool stm32_synth_acquire(uint8_t voice, vernie_head_port_t head_port, voi
         if (head_port == VERNIE_HEAD_PORT_C) {
             pbdrv_gpio_out_low(&k_pin_c1);
             pbdrv_gpio_out_low(&k_pin_c2);
-            // Port C: pin1 = PC8 (CH3 Mode 1), pin2 = PC6 (CH1 Mode 2)
+            // Port C: pin1 = PC8 (CH3 Mode 1), pin2 = PC6 (CH1 Mode 2 -> 0xFFFF = LOW)
             TIM3->CCMR2 = (TIM3->CCMR2 & ~0x00FFu) | 0x0068u;
             TIM3->CCMR1 = (TIM3->CCMR1 & ~0x00FFu) | 0x0078u;
             TIM3->CCR3 = 0u;
-            TIM3->CCR1 = 0u;
+            TIM3->CCR1 = 0xFFFFu;
             TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC3E;
             TIM3->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
             TIM3->EGR = TIM_EGR_UG;
@@ -405,11 +476,11 @@ static bool stm32_synth_acquire(uint8_t voice, vernie_head_port_t head_port, voi
         if (head_port == VERNIE_HEAD_PORT_D) {
             pbdrv_gpio_out_low(&k_pin_d1);
             pbdrv_gpio_out_low(&k_pin_d2);
-            // Port D: pin1 = PC7 (CH2 Mode 1), pin2 = PC9 (CH4 Mode 2)
+            // Port D: pin1 = PC7 (CH2 Mode 1), pin2 = PC9 (CH4 Mode 2 -> 0xFFFF = LOW)
             TIM3->CCMR1 = (TIM3->CCMR1 & ~0xFF00u) | 0x6800u;
             TIM3->CCMR2 = (TIM3->CCMR2 & ~0xFF00u) | 0x7800u;
             TIM3->CCR2 = 0u;
-            TIM3->CCR4 = 0u;
+            TIM3->CCR4 = 0xFFFFu;
             TIM3->CCER = TIM_CCER_CC2E | TIM_CCER_CC4E;
             TIM3->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
             TIM3->EGR = TIM_EGR_UG;

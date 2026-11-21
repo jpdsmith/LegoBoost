@@ -93,19 +93,25 @@ def attest_pwm_synth(source_path: Path, max_error_pct: float = 0.5) -> dict[str,
                     continue
 
                 notes_checked += 1
-                actual_hz = CLK_HZ / ((pwm.psc + 1) * (pwm.arr + 1))
+                period = pwm.arr + 1
+                actual_hz = CLK_HZ / ((pwm.psc + 1) * period)
                 err_pct = abs(actual_hz - hz) * 100.0 / hz
                 worst_err_pct = max(worst_err_pct, err_pct)
 
-                duty_pct = (pwm.ccr1 * 100.0) / pwm.arr
-                deadband_pct = ((pwm.ccr2 - pwm.ccr1) * 100.0) / pwm.arr
+                # Pin1 (Mode 1, CNT < ccr1): ccr1 ticks HIGH
+                # Pin2 (Mode 2, CNT >= ccr2): (arr - ccr2 + 1) ticks HIGH
+                # Exact 0.0 V DC symmetry requires ccr2 == (arr + 1) - ccr1!
+                pin1_ticks = pwm.ccr1
+                pin2_ticks = period - pwm.ccr2
+                duty_pct = (pin1_ticks * 100.0) / period
+                deadband_pct = ((pwm.ccr2 - pwm.ccr1) * 100.0) / period
                 max_duty_pct = max(max_duty_pct, duty_pct)
                 min_deadband_pct = min(min_deadband_pct, deadband_pct)
 
                 if err_pct > max_error_pct:
                     errors.append(f"MIDI {midi} ({hz} Hz): pitch error {err_pct:.4f}% > {max_error_pct}%")
-                if pwm.ccr2 != pwm.arr - pwm.ccr1:
-                    errors.append(f"MIDI {midi}: asymmetric bipolar PWM (ccr1={pwm.ccr1}, ccr2={pwm.ccr2}, arr={pwm.arr})")
+                if pin1_ticks != pin2_ticks or pwm.ccr2 != period - pwm.ccr1:
+                    errors.append(f"MIDI {midi}: asymmetric bipolar PWM (pin1={pin1_ticks}, pin2={pin2_ticks}, arr={pwm.arr})")
                 if duty_pct > 15.0 + 1e-9:
                     errors.append(f"MIDI {midi}: duty {duty_pct:.2f}% exceeds 15% cap")
                 if deadband_pct < 70.0 - 1e-9:

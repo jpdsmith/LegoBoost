@@ -145,6 +145,7 @@ typedef struct {
     bool safe_mode;
     bool dart_armed;
     bool drive_active;
+    bool manual_drive_received;
     int8_t drive_left;
     int8_t drive_right;
     uint32_t drive_deadline_ms;
@@ -164,6 +165,10 @@ typedef struct {
     uint8_t synth_voice;
     uint8_t synth_preset_or_note;
     uint16_t synth_dur_ms;
+    uint8_t synth_q_count;
+    uint8_t synth_q_voice[2];
+    uint8_t synth_q_note[2];
+    uint16_t synth_q_dur[2];
     bool macro_cmd_pending;
     uint8_t macro_subcmd;
     uint8_t macro_offset;

@@ -55,7 +55,7 @@ BlueNRG-MS enforces `ATT_MTU = 23` (20-byte ATT payload) and **Write With Respon
 | `7` | `flags` | `uint8` | Bitmask: `0:PICKED_UP, 1:BUMP, 2:TAP, 3:DART_ARMED, 4:HEAD_HOMED, 5:SENSOR_OK, 6:SAFE_MODE, 7:SYNTH_ACTIVE` |
 | `8` | `mode_id` | `uint8` | Active Vernie mode (`0..4`) |
 | `9..14` | `enc_a, enc_b, head_deg` | `int16 × 3` | Encoder positions (degrees) |
-| `15..16` | `speed_a, speed_b` | `int8 × 2` | Active drive commands (`-100..+100`) |
+| `15..16` | `speed_a, speed_b` | `int8 × 2` | Measured track encoder speeds scaled `-100..+100` (`±1200 deg/s`) |
 | `17` | `seq` | `uint8` | Rolling sequence number (`0..255`) |
 
 ## Macro Engine (`0x07 MACRO_OP`) Subcommands & 5-Byte Step ISA

@@ -29,7 +29,7 @@ sources:
 
 # Overview
 
-Compiles `firmware/src/vernie_synth.c` directly via `gcc -shared` and exhaustively checks `vernie_synth_calc_pwm()` across all 49 MIDI notes from A3 (`220 Hz`) to A7 (`3520 Hz`) at 4 volume levels (`196` total cases), attesting pitch error `<= 0.5%`, `PSC <= 65535`, `ARR <= 65535`, `ccr2 == ARR - ccr1`, `duty <= 15%`, and coast dead-band `>= 70%`.[^vernie-synth-c][^singing-motors-spec]
+Compiles `firmware/src/vernie_synth.c` directly via `gcc -shared` and exhaustively checks `vernie_synth_calc_pwm()` across all 49 MIDI notes from A3 (`220 Hz`) to A7 (`3520 Hz`) at 4 volume levels (`196` total cases), attesting pitch error `<= 0.5%`, `PSC <= 65535`, `ARR <= 65535`, `ccr2 == (ARR + 1) - ccr1`, `duty <= 15%`, and coast dead-band `>= 70%`.[^vernie-synth-c][^singing-motors-spec]
 
 [^vernie-synth-c]: Vernie OS `firmware/src/vernie_synth.c` divider calculator
 [^singing-motors-spec]: Vernie OS Singing-Motor Hardware Specification

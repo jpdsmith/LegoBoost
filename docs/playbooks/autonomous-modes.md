@@ -24,18 +24,18 @@ sources:
 Vernie OS boots immediately into standalone autonomous operation (no Chromebook or app needed):[^vernie-modes-c]
 
 - **Power on:** Tap the green Move Hub button once; Vernie plays the startup boot chime and enters **Mode 0 (Living Pet)**.
-- **Cycle modes (`0 -> 1 -> 2 -> 3 -> 4 -> 0`):** Short-press the green hub button, OR **double-tap Vernie's torso** while stationary (gated by `>= 250 ms` stationary window so driving vibrations never false-trigger), OR click a mode button in the [Web Cockpit](../architecture/web-cockpit.md).
+- **Cycle standalone modes (`0 -> 1 -> 2 -> 3 -> 0`):** Short-press the green hub button, OR **double-tap Vernie's torso** while stationary (gated by `>= 250 ms` stationary window so driving vibrations never false-trigger), OR select any mode (`0..4`) in the [Web Cockpit](../architecture/web-cockpit.md).
 - **Power off:** Hold the green hub button for **2 seconds** (coasts all motors, stops synth, and flushes any pending `FLASH_USER_1` save).
 
 # Mode Reference
 
 | Mode | Hub LED Color | Standalone Behavior | Safety Invariants |
 | :---: | :--- | :--- | :--- |
-| **0 — Living Pet** | Breathing Cyan | Periodic curious head looks & R2-D2 chirps every 4.5 s; playful 400 ms reverse + chirp when a hand approaches `<= 50%` distance. | Universal pickup reflex coasts tracks, flashes red LED, shakes head, and squawks. |
-| **1 — Room Explorer** | Solid Green | Cruises forward (`45%`); triggers obstacle avoidance on **either** 88007 proximity `<= 40%` **or** fused LIS3DH bump / motor stall → backs up `450 ms`, scans head `-35°` and `+35°`, and pivots toward the clearer side (alternates on tie). | Universal pickup reflex; never drives while picked up. |
-| **2 — Desk Sentry** | Slow Red Pulse | Interleaves a `200 ms` red 88007 chest LED glow with `800 ms` `SPEC1` sensing windows while scanning head `±30°`. Locks onto targets `<= 45%` for `1.5 s` with warning siren, then engages. | **Disarmed by default!** Disarmed engage performs a safe track wiggle + laser SFX. Dart fires **only** if explicitly armed via BLE (`0x03`, `0xA5`) AND head is homed, then auto-disarms. |
-| **3 — Color Cards** | Solid Yellow | Watches for LEGO color bricks/cards held **close (`<= 25%`) for `>= 250 ms`** to eliminate ambient false triggers: **Green** = drive forward & cheer, **Red** = spin & squawk, **Blue** = dance & victory chiptune, **Yellow** = run saved `FLASH_USER_1` macro. | `1.5 s` post-action cooldown; bump stops Green forward run early. |
-| **4 — Remote Cockpit** | Solid Blue | Autonomous brain yields cleanly (`active = false`) to Web Bluetooth joystick, head, synth, LED, and macro commands. | Reverts automatically to Mode 0 (Pet) if BLE disconnects; dead-man drive timer coasts tracks after `100–1000 ms`. |
+| **0 — Living Pet** | Breathing Blue (`215°`) | Periodic curious head looks & R2-D2 chirps every 4.5 s; playful 400 ms reverse + chirp when a hand approaches `<= 50%` distance. | Universal pickup reflex coasts tracks, flashes red LED, shakes head, and squawks; head moves only when homed. |
+| **1 — Room Explorer** | Breathing Green (`120°`) | Cruises forward (`45%`); triggers obstacle avoidance on **either** 88007 proximity `<= 40%` **or** fused LIS3DH bump / motor stall → backs up `450 ms`, scans head `-35°` and `+35°`, and pivots toward the clearer side (alternates on tie). | Universal pickup reflex; never drives while picked up; any BLE `DRIVE`/`STOP` immediately switches to Mode 4. |
+| **2 — Desk Sentry** | Breathing Red (`0°`) | Interleaves a `200 ms` red 88007 chest LED glow with `800 ms` `SPEC1` sensing windows while scanning head `±30°`. Locks onto targets `<= 45%` for `1.5 s` with warning siren, then engages. | **Disarmed by default!** Disarmed engage performs a safe track wiggle + laser SFX. Dart fires **only** if explicitly armed via BLE (`0x03`, `0xA5`), head is homed, and Vernie is not picked up, then auto-disarms. |
+| **3 — Color Cards** | Breathing Yellow (`50°`) | Watches for LEGO color bricks/cards held **close (`<= 25%`) for `>= 250 ms`** to eliminate ambient false triggers: **Green** = drive forward & cheer, **Red** = spin & squawk, **Blue** = dance & victory chiptune, **Yellow** = run saved `FLASH_USER_1` macro. | `1.5 s` post-action cooldown; bump stops Green forward run early. |
+| **4 — Remote Cockpit** | Breathing Purple (`285°`) | Autonomous brain yields cleanly (`active = false`) to Web Bluetooth joystick, head, synth, LED, and macro commands. | Reverts automatically to Mode 0 (Pet) if BLE disconnects; dead-man drive timer coasts tracks after `100–1000 ms`. |
 
 # Offline Flash Macros (`FLASH_USER_1`)
 

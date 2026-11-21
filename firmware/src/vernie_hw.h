@@ -89,13 +89,22 @@ typedef struct {
 
 void vernie_head_fsm_init(vernie_head_fsm_t *fsm, int16_t home_offset_deg);
 
+static inline bool vernie_head_fsm_is_busy(const vernie_head_fsm_t *fsm) {
+    return fsm && fsm->state != VERNIE_HEAD_STATE_UNHOMED && fsm->state != VERNIE_HEAD_STATE_READY;
+}
+
 /**
  * Advance head homing / target positioning / armed dart fire FSM.
+ * Enforces:
+ *   - MOVE_TARGET strictly gated on fsm->homed (prevents unhomed relative offset hitting dart trigger)
+ *   - Premature dart/home/angle requests cleared during active multi-step sequences (no latching!)
+ *   - Picked-up aborts DART_FIRING and rejects new dart fires
  */
 void vernie_head_fsm_step(
     vernie_head_fsm_t *fsm,
     bool head_present,
     bool safe_mode,
+    bool picked_up,
     bool motor_done,
     bool motor_stalled,
     bool home_requested,
@@ -149,6 +158,8 @@ typedef struct {
 #ifndef VERNIE_HOST_TEST
 typedef struct {
     vernie_port_map_t ports;
+    vernie_ext_dev_kind_t last_port_c;
+    vernie_ext_dev_kind_t last_port_d;
     vernie_head_fsm_t head_fsm;
     vernie_sensor_state_t sensor;
     bool drive_a_ready;

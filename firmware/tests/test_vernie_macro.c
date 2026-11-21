@@ -88,7 +88,7 @@ static void test_chunked_upload_save_reload_and_playback(void) {
     // SAVE marks storage dirty; idle flush persists to FLASH_USER_1!
     assert(vernie_macro_handle_cmd(&m, &st, VERNIE_MACRO_SUB_SAVE, 0u, NULL, 0u, 30u));
     assert(st.dirty);
-    assert(vernie_storage_try_flush(&st, false));
+    assert(vernie_storage_try_flush(&st, false, 100u));
     assert(mf.writes == 1);
 
     // Cold-boot reload restores exact 20-byte macro from FLASH_USER_1!

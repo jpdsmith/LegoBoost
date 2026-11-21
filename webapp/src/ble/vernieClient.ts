@@ -47,7 +47,8 @@ export interface VernieClientCallbacks {
  */
 export class CoalescingGattWriter {
   private inFlight = false;
-  private latestCoalesced: Uint8Array | null = null;
+  private urgentSlot: Uint8Array | null = null;
+  private coalescedSlots = new Map<string, Uint8Array>();
   private fifoQueue: Array<{
     data: Uint8Array;
     resolve: () => void;
@@ -61,9 +62,20 @@ export class CoalescingGattWriter {
     private readonly onError?: (err: Error) => void
   ) {}
 
-  enqueueCoalesced(data: Uint8Array): void {
+  /**
+   * High-priority slot (used for emergency DRIVE(0, 0) STOP): jumps ahead of all queued
+   * FIFO and coalesced commands and cancels any stale pending drive frame.
+   */
+  enqueueUrgent(data: Uint8Array, clearChannel = "drive"): void {
     if (this.disposed) return;
-    this.latestCoalesced = data;
+    this.coalescedSlots.delete(clearChannel);
+    this.urgentSlot = data;
+    void this.pump();
+  }
+
+  enqueueCoalesced(data: Uint8Array, channel = "drive"): void {
+    if (this.disposed) return;
+    this.coalescedSlots.set(channel, data);
     void this.pump();
   }
 
@@ -79,7 +91,8 @@ export class CoalescingGattWriter {
 
   reset(reason = "Disconnected"): void {
     this.disposed = true;
-    this.latestCoalesced = null;
+    this.urgentSlot = null;
+    this.coalescedSlots.clear();
     const pending = this.fifoQueue.splice(0);
     for (const item of pending) {
       item.reject(new Error(reason));
@@ -91,7 +104,17 @@ export class CoalescingGattWriter {
     this.inFlight = true;
     try {
       while (!this.disposed) {
-        if (this.fifoQueue.length > 0) {
+        if (this.urgentSlot !== null) {
+          const payload = this.urgentSlot;
+          this.urgentSlot = null;
+          try {
+            await this.writeFn(payload);
+          } catch (err) {
+            if (!this.disposed) {
+              this.onError?.(err instanceof Error ? err : new Error(String(err)));
+            }
+          }
+        } else if (this.fifoQueue.length > 0) {
           const item = this.fifoQueue.shift()!;
           try {
             item.onStart?.();
@@ -100,9 +123,10 @@ export class CoalescingGattWriter {
           } catch (err) {
             item.reject(err);
           }
-        } else if (this.latestCoalesced !== null) {
-          const payload = this.latestCoalesced;
-          this.latestCoalesced = null;
+        } else if (this.coalescedSlots.size > 0) {
+          const firstKey = this.coalescedSlots.keys().next().value!;
+          const payload = this.coalescedSlots.get(firstKey)!;
+          this.coalescedSlots.delete(firstKey);
           try {
             await this.writeFn(payload);
           } catch (err) {
@@ -142,6 +166,7 @@ export class VernieClient {
   private writer: CoalescingGattWriter | null = null;
   private state: ConnectionState = "disconnected";
   private connectSeq = 0;
+  private macroTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly callbacks: VernieClientCallbacks = {}) {}
 
@@ -275,6 +300,8 @@ export class VernieClient {
   }
 
   private cleanup(): void {
+    // I6: invalidate any in-flight connect()/startNotifications() attempt on unexpected disconnect!
+    this.connectSeq += 1;
     if (this.char) {
       this.char.removeEventListener("characteristicvaluechanged", this.handleNotification);
       this.char = null;
@@ -294,12 +321,24 @@ export class VernieClient {
 
   sendDrive(left: number, right: number, timeoutMs = 400): void {
     if (!this.writer) return;
-    this.writer.enqueueCoalesced(wrapPybricksAppData(encodeDrive(left, right, timeoutMs)));
+    const packet = wrapPybricksAppData(encodeDrive(left, right, timeoutMs));
+    if (left === 0 && right === 0) {
+      // I6: Emergency STOP always jumps ahead of queued FIFO/slider writes!
+      this.writer.enqueueUrgent(packet, "drive");
+    } else {
+      this.writer.enqueueCoalesced(packet, "drive");
+    }
   }
 
-  sendHead(angleDeg: number, speed = 50): Promise<void> {
+  sendHead(angleDeg: number, speed = 50, options: { coalesce?: boolean } = {}): Promise<void> {
     if (!this.writer) return Promise.reject(new Error("Not connected"));
-    return this.writer.enqueueReliable(wrapPybricksAppData(encodeHead(angleDeg, speed)));
+    const packet = wrapPybricksAppData(encodeHead(angleDeg, speed));
+    // Non-homing slider moves coalesce so dragging never floods FIFO or starves STOP!
+    if (options.coalesce && angleDeg !== 127) {
+      this.writer.enqueueCoalesced(packet, "head");
+      return Promise.resolve();
+    }
+    return this.writer.enqueueReliable(packet);
   }
 
   sendDart(subcmd: number): Promise<void> {
@@ -332,23 +371,34 @@ export class VernieClient {
     return this.writer.enqueueReliable(wrapPybricksAppData(encodeMacroChunk(subcmd, offset, data)));
   }
 
-  async uploadMacro(
+  private runSerializedMacro<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.macroTail.then(fn, fn);
+    this.macroTail = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+
+  uploadMacro(
     steps: MacroStep[],
     options: { saveToFlash?: boolean; playAfter?: boolean } = {}
   ): Promise<void> {
-    if (!this.writer) throw new Error("Not connected");
-    const bytecode = encodeMacroSteps(steps);
-    const chunks = splitMacroIntoChunks(bytecode, 10);
-    await this.sendMacroOp(MacroSubcmd.CLEAR);
-    for (const chunk of chunks) {
-      await this.sendMacroOp(MacroSubcmd.WRITE_CHUNK, chunk.offset, chunk.data);
-    }
-    if (options.saveToFlash) {
-      await this.sendMacroOp(MacroSubcmd.SAVE);
-    }
-    if (options.playAfter) {
-      await this.sendMacroOp(MacroSubcmd.PLAY);
-    }
+    return this.runSerializedMacro(async () => {
+      if (!this.writer) throw new Error("Not connected");
+      const bytecode = encodeMacroSteps(steps);
+      const chunks = splitMacroIntoChunks(bytecode, 10);
+      await this.sendMacroOp(MacroSubcmd.CLEAR);
+      for (const chunk of chunks) {
+        await this.sendMacroOp(MacroSubcmd.WRITE_CHUNK, chunk.offset, chunk.data);
+      }
+      if (options.saveToFlash) {
+        await this.sendMacroOp(MacroSubcmd.SAVE);
+      }
+      if (options.playAfter) {
+        await this.sendMacroOp(MacroSubcmd.PLAY);
+      }
+    });
   }
 
   playMacro(): Promise<void> {
@@ -359,11 +409,13 @@ export class VernieClient {
     return this.sendMacroOp(MacroSubcmd.STOP);
   }
 
-  async clearMacro(saveToFlash = true): Promise<void> {
-    await this.sendMacroOp(MacroSubcmd.CLEAR);
-    if (saveToFlash) {
-      await this.sendMacroOp(MacroSubcmd.SAVE);
-    }
+  clearMacro(saveToFlash = true): Promise<void> {
+    return this.runSerializedMacro(async () => {
+      await this.sendMacroOp(MacroSubcmd.CLEAR);
+      if (saveToFlash) {
+        await this.sendMacroOp(MacroSubcmd.SAVE);
+      }
+    });
   }
 
   async rebootToBootloader(): Promise<void> {

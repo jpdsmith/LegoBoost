@@ -132,7 +132,7 @@ export const App: React.FC = () => {
           onConnect={() => void runBle(() => client.connect())}
           onDisconnect={() => client.disconnect()}
           onDrive={(l, r, t) => client.sendDrive(l, r, t)}
-          onHead={(deg, spd) => void runBle(() => client.sendHead(deg, spd))}
+          onHead={(deg, spd, coalesce) => void runBle(() => client.sendHead(deg, spd, { coalesce }))}
           onSynth={(v, n, d) => void runBle(() => client.sendSynth(v, n, d))}
           onSetHubLed={(r, g, b) => void runBle(() => client.sendHubLed(r, g, b))}
           onSetChestLed={(s) => void runBle(() => client.sendChestLed(s))}

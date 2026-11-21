@@ -351,5 +351,110 @@ describe("Layer 4 — Coalescing GATT Scheduler & VernieClient Resilience (T4.2)
       [0x07, 0x00, 0x00, 0x07, MacroSubcmd.CLEAR, 0],
       [0x07, 0x00, 0x00, 0x07, MacroSubcmd.SAVE, 0],
     ]);
+
+    // Invalid chest LED state in macro & out-of-bounds chunk offset must throw RangeError
+    expect(() =>
+      encodeMacroSteps([{ op: MacroStepOp.LED, arg0: 1, arg1: 7, durMs: 100 }])
+    ).toThrow(RangeError);
+    expect(() => encodeMacroChunk(MacroSubcmd.WRITE_CHUNK, 225, new Uint8Array(10))).toThrow(RangeError);
+  });
+
+  it("I6 regressions: urgent STOP jumps ahead of FIFO/slider flood, concurrent uploads serialize, and mid-startNotifications disconnect avoids zombie state", async () => {
+    const writes: number[][] = [];
+    const mockChar: BleCharacteristicLike = {
+      writeValueWithResponse: async (buf) => {
+        await new Promise((r) => setTimeout(r, 10));
+        writes.push(Array.from(toBytes(buf)));
+      },
+      startNotifications: async () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+
+    const client = new VernieClient();
+    await client.attachCharacteristic(mockChar, "VernieOS");
+
+    // Queue 4 slow FIFO writes + rapid coalesced head slider drags, then trigger emergency STOP!
+    const pFifo = [
+      client.sendHubLed(1, 2, 3),
+      client.sendHubLed(4, 5, 6),
+      client.sendHubLed(7, 8, 9),
+      client.sendHubLed(10, 11, 12),
+    ];
+    for (let deg = -35; deg <= 35; deg += 5) {
+      void client.sendHead(deg, 50, { coalesce: true });
+    }
+    client.sendDrive(0, 0, 200); // Urgent STOP!
+
+    await Promise.all(pFifo);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Write #0 was already in-flight; write #1 MUST be emergency STOP (0x01 0 0)!
+    const stopIdx = writes.findIndex((w) => w[3] === 0x01 && w[4] === 0 && w[5] === 0);
+    expect(stopIdx).toBe(1);
+    // Rapid 15 slider moves MUST have coalesced down to at most 1 head write!
+    const headWrites = writes.filter((w) => w[3] === 0x02);
+    expect(headWrites.length).toBeLessThanOrEqual(1);
+
+    // Concurrent uploadMacro calls MUST serialize strictly (CLEAR..SAVE, then CLEAR..PLAY) without interleaving!
+    writes.length = 0;
+    const s1 = [{ op: MacroStepOp.WAIT, arg0: 0, arg1: 0, durMs: 100 }];
+    const s2 = [{ op: MacroStepOp.WAIT, arg0: 0, arg1: 0, durMs: 200 }];
+    await Promise.all([
+      client.uploadMacro(s1, { saveToFlash: true }),
+      client.uploadMacro(s2, { playAfter: true }),
+    ]);
+    const subcmds = writes.map((w) => w[4]);
+    expect(subcmds).toEqual([
+      MacroSubcmd.CLEAR,
+      MacroSubcmd.WRITE_CHUNK,
+      MacroSubcmd.SAVE,
+      MacroSubcmd.CLEAR,
+      MacroSubcmd.WRITE_CHUNK,
+      MacroSubcmd.PLAY,
+    ]);
+
+    // Disconnect firing mid-startNotifications MUST NOT transition to zombie "connected" state!
+    client.disconnect();
+    let resolveNotif!: () => void;
+    let disconnectCb: (() => void) | undefined;
+    const fakeChar: BleCharacteristicLike = {
+      writeValueWithResponse: async () => {},
+      startNotifications: () =>
+        new Promise<void>((resolve) => {
+          resolveNotif = resolve;
+        }),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const fakeDevice = {
+      name: "VernieOS",
+      addEventListener: (ev: string, fn: () => void) => {
+        if (ev === "gattserverdisconnected") disconnectCb = fn;
+      },
+      removeEventListener: vi.fn(),
+      gatt: {
+        connected: true,
+        connect: async () => ({
+          getPrimaryService: async () => ({
+            getCharacteristic: async () => fakeChar,
+          }),
+        }),
+        disconnect: vi.fn(),
+      },
+    };
+    vi.stubGlobal("navigator", {
+      bluetooth: {
+        requestDevice: vi.fn().mockResolvedValue(fakeDevice),
+      },
+    });
+
+    const pConn = client.connect();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(disconnectCb).toBeDefined();
+    disconnectCb!(); // Unexpected BLE drop while awaiting startNotifications()!
+    resolveNotif();
+    await pConn;
+    expect(client.getState()).toBe("disconnected");
   });
 });

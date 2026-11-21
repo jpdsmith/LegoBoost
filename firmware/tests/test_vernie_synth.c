@@ -55,14 +55,16 @@ static void test_frequency_accuracy_and_bipolar_symmetry(void) {
             double err_pct = fabs(actual_hz - (double)hz) * 100.0 / (double)hz;
             assert(err_pct < 0.5);
 
-            // Symmetrical 0 V DC creep-free invariant:
-            //   pin1 active on [0, ccr1), pin2 active on [ccr2, arr], ccr2 == arr - ccr1
+            // Symmetrical 0.0 V DC creep-free invariant:
+            //   period = ARR + 1 ticks; pin1 HIGH on [0, ccr1) = d ticks;
+            //   pin2 HIGH on [ccr2, ARR] = period - ccr2 = d ticks => ccr2 == period - ccr1.
+            uint32_t period = (uint32_t)pwm.arr + 1u;
             assert(pwm.ccr1 >= 1u);
-            assert(pwm.ccr2 == (uint16_t)(pwm.arr - pwm.ccr1));
-            assert((uint32_t)pwm.ccr1 * 100u <= (uint32_t)pwm.arr * VERNIE_SYNTH_MAX_DUTY_PCT);
-            // Dead-band >= 70% of ARR (both pins LOW)
+            assert(pwm.ccr2 == (uint16_t)(period - pwm.ccr1));
+            assert((uint32_t)pwm.ccr1 * 100u <= period * VERNIE_SYNTH_MAX_DUTY_PCT);
+            // Dead-band >= 70% of period (both pins LOW)
             uint32_t deadband = (uint32_t)pwm.ccr2 - (uint32_t)pwm.ccr1;
-            assert(deadband * 100u >= (uint32_t)pwm.arr * 70u);
+            assert(deadband * 100u >= period * 70u);
         }
     }
 
@@ -71,6 +73,7 @@ static void test_frequency_accuracy_and_bipolar_symmetry(void) {
     assert(!vernie_synth_calc_pwm(50u, 80u, &bad));
     assert(!vernie_synth_calc_pwm(5000u, 80u, &bad));
     assert(vernie_midi_to_hz(20u) == 0u);
+    assert(vernie_midi_to_hz(108u) == 0u);
 }
 
 static void test_timer_arbitration_and_tim3_safety(void) {
@@ -115,6 +118,18 @@ static void test_timer_arbitration_and_tim3_safety(void) {
     assert(!m.locked[VERNIE_SYNTH_VOICE_HEAD]);
     assert(!vernie_synth_is_active(&s));
     assert(m.release_count[VERNIE_SYNTH_VOICE_HEAD] == 1);
+
+    // C4 regression: busy head blocks VOICE_HEAD and redirects VOICE_BOTH (Auto) to VOICE_TRACKS!
+    vernie_synth_set_busy(&s, false, true);
+    assert(!vernie_synth_command(&s, VERNIE_SYNTH_VOICE_HEAD, 69u, 200u, 500u));
+    assert(vernie_synth_command(&s, VERNIE_SYNTH_VOICE_BOTH, VERNIE_SFX_HAPPY_CHIRP, 0u, 500u));
+    assert(m.locked[VERNIE_SYNTH_VOICE_TRACKS] && !m.locked[VERNIE_SYNTH_VOICE_HEAD]);
+    vernie_synth_stop_all(&s);
+
+    // Both tracks and head busy -> Auto voice refuses safely!
+    vernie_synth_set_busy(&s, true, true);
+    assert(!vernie_synth_command(&s, VERNIE_SYNTH_VOICE_BOTH, VERNIE_SFX_HAPPY_CHIRP, 0u, 600u));
+    assert(!vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 200u, 600u));
 }
 
 static void test_preset_sequencer_and_thermal_watchdog(void) {
@@ -156,6 +171,33 @@ static void test_preset_sequencer_and_thermal_watchdog(void) {
     assert(!vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 200u, 4200u));
     // At 4500 ms cooldown expires -> plays normally again!
     assert(vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 200u, 4500u));
+    vernie_synth_stop_all(&s);
+
+    // I1 regression 1: rapid 20 ms re-triggers BEFORE vernie_synth_tick MUST NOT bypass 3000 ms cap!
+    vernie_synth_init(&s, &hal, 80u);
+    uint32_t t = 10000u;
+    bool tripped = false;
+    for (int i = 0; i <= 160; i++) {
+        bool ok = vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 100u, t);
+        if (!ok) {
+            assert(t == 13000u);
+            tripped = true;
+            break;
+        }
+        vernie_synth_tick(&s, t); // tick at same timestamp (dt=0), replicating BLE-before-tick loop!
+        t += 20u;
+    }
+    assert(tripped);
+    assert(!vernie_synth_is_active(&s));
+
+    // I1 regression 2: back-to-back 2900 ms tone + 20 ms silence MUST trip after 120 ms (leaky bucket)!
+    vernie_synth_init(&s, &hal, 80u);
+    assert(vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 2900u, 20000u));
+    vernie_synth_tick(&s, 22900u); // ends naturally with 2900 ms thermal credit
+    assert(!vernie_synth_is_active(&s));
+    assert(vernie_synth_command(&s, VERNIE_SYNTH_VOICE_TRACKS, 69u, 500u, 22920u)); // 20 ms cool -> 2880 ms
+    vernie_synth_tick(&s, 23040u); // +120 ms = 3000 ms -> MUST cut off!
+    assert(!vernie_synth_is_active(&s));
 }
 
 int main(void) {
