@@ -7,7 +7,7 @@ PBTOP      := $(TOP)/third_party/pybricks-micropython
 STM32LIB   := $(TOP)/third_party/stm32lib
 CMSIS6     := $(TOP)/third_party/CMSIS_6
 BUILD      := build
-FW_VERSION ?= vernie-os-0.2.0
+FW_VERSION ?= vernie-os-0.3.0
 HUB_NAME   ?= VernieOS
 
 CROSS_COMPILE ?= arm-none-eabi-
@@ -75,6 +75,8 @@ VERNIE_SRC_C := \
 	src/vernie_imu.c \
 	src/vernie_storage.c \
 	src/vernie_hw.c \
+	src/vernie_macro.c \
+	src/vernie_modes.c \
 	src/string_minimal.c
 
 # --- Pure-MIT Pybricks lib/pbio + Move Hub Driver Sources (NO telemetry.c, NO block_device) ---
@@ -278,6 +280,17 @@ test:
 		tests/test_vernie_hw.c \
 		-o $(BUILD)/host_tests/test_vernie_hw
 	$(BUILD)/host_tests/test_vernie_hw
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_storage.c \
+		src/vernie_macro.c \
+		tests/test_vernie_macro.c \
+		-o $(BUILD)/host_tests/test_vernie_macro
+	$(BUILD)/host_tests/test_vernie_macro
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_modes.c \
+		tests/test_vernie_modes.c \
+		-o $(BUILD)/host_tests/test_vernie_modes
+	$(BUILD)/host_tests/test_vernie_modes
 
 -include $(ALL_DEP)
 

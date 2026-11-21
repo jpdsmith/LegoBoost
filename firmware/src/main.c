@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Vernie OS Phase 2 Firmware for LEGO BOOST Move Hub (STM32F070RB).
+// Vernie OS Phase 3 Firmware for LEGO BOOST Move Hub (STM32F070RB).
 //
 // Features:
 //   - Pure-MIT build (compile-time guard enforces PBSYS_CONFIG_TELEMETRY == 0)
@@ -9,7 +9,8 @@
 //   - Port C/D auto-detection, non-trigger single-direction head homing, armed-only dart launcher
 //   - 88007 Color & Distance Sensor (SPEC1 combined sensing + 4-state COL_O chest LED)
 //   - 2-voice symmetrical bipolar singing-motor synth (TIM1 & TIM3) with R2-D2 SFX & 3s thermal cap
-//   - CRC32 persistent calibration/macros in unchecked FLASH_USER_1 (0x0801F800)
+//   - Onboard Autonomous Brain (Pet, Explorer, Sentry, Color-Card Commander, Remote)
+//   - Chunked 0x07 MACRO_OP bytecode sequencer persisted to unchecked FLASH_USER_1 with CRC32
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -34,6 +35,8 @@
 
 #include "vernie_hw.h"
 #include "vernie_imu.h"
+#include "vernie_macro.h"
+#include "vernie_modes.h"
 #include "vernie_runtime.h"
 #include "vernie_storage.h"
 #include "vernie_synth.h"
@@ -56,6 +59,8 @@ static vernie_storage_t g_storage;
 static vernie_imu_t g_imu;
 static vernie_synth_t g_synth;
 static vernie_hw_t g_hw;
+static vernie_macro_t g_macro;
+static vernie_modes_t g_modes;
 static volatile bool g_stop_requested = false;
 
 // --- pbsys_main application hooks ---
@@ -79,6 +84,7 @@ bool pbsys_main_stdin_event(uint8_t c) {
 void pbsys_main_run_program_cleanup(void) {
     pbsys_command_set_write_app_data_callback(NULL);
     pbsys_host_app_data_clear_pending();
+    vernie_macro_stop(&g_macro);
     vernie_synth_stop_all(&g_synth);
     vernie_hw_coast_all(&g_hw);
     (void)vernie_storage_try_flush(&g_storage, false);
@@ -87,14 +93,34 @@ void pbsys_main_run_program_cleanup(void) {
 // --- BLE AppData RX handler (<= 17 bytes inside PBIO_PYBRICKS_COMMAND_WRITE_APP_DATA) ---
 
 static pbio_error_t vernie_on_app_data_rx(uint16_t offset, uint32_t size, const uint8_t *data) {
-    vernie_parse_result_t res = vernie_runtime_on_rx(&g_rt, offset, data, (size_t)size, pbdrv_clock_get_ms());
-    if (res == VERNIE_PARSE_OK) {
-        return PBIO_SUCCESS;
-    }
+    uint32_t now_ms = pbdrv_clock_get_ms();
+    vernie_parse_result_t res = vernie_runtime_on_rx(&g_rt, offset, data, (size_t)size, now_ms);
     if (res == VERNIE_PARSE_ERR_INTERLOCK) {
         return PBIO_ERROR_INVALID_OP;
     }
-    return PBIO_ERROR_INVALID_ARG;
+    if (res != VERNIE_PARSE_OK) {
+        return PBIO_ERROR_INVALID_ARG;
+    }
+
+    // Dispatch chunked 0x07 MACRO_OP synchronously on cooperative BLE RX so rapid multi-chunk
+    // uploads never drop chunks and invalid offsets return immediate ATT Write errors.
+    if (g_rt.ctrl.macro_cmd_pending) {
+        g_rt.ctrl.macro_cmd_pending = false;
+        bool ok = vernie_macro_handle_cmd(
+            &g_macro,
+            &g_storage,
+            g_rt.ctrl.macro_subcmd,
+            g_rt.ctrl.macro_offset,
+            g_rt.ctrl.macro_data,
+            g_rt.ctrl.macro_data_len,
+            now_ms
+        );
+        if (!ok) {
+            return PBIO_ERROR_INVALID_ARG;
+        }
+    }
+
+    return PBIO_SUCCESS;
 }
 
 // --- Hub LED output helper ---
@@ -129,11 +155,15 @@ static pbio_error_t vernie_os_thread(pbio_os_state_t *state, void *context) {
     static pbio_os_state_t tx_sub;
     static bool adv_in_flight;
     static bool tx_in_flight;
+    static bool pickup_alert_led_active;
+    static uint8_t prev_mode_id;
 
     PBIO_OS_ASYNC_BEGIN(state);
 
     adv_in_flight = false;
     tx_in_flight = false;
+    pickup_alert_led_active = false;
+    prev_mode_id = 0xFFu;
     pbio_os_timer_set(&tick_timer, 20);
 
     // Play friendly startup boot chime if not in Watchdog Safe Mode.
@@ -182,11 +212,116 @@ static pbio_error_t vernie_os_thread(pbio_os_state_t *state, void *context) {
         }
         vernie_synth_tick(&g_synth, now_ms);
 
-        // 4. Step motors, Port C/D auto-detect, head homing/dart FSM, and 88007 sensor.
-        vernie_hw_snapshot_t snap;
-        vernie_hw_step(&g_hw, &g_rt.ctrl, &g_synth, g_imu.picked_up, now_ms, &snap);
+        if (prev_mode_id != 0xFFu && g_rt.ctrl.mode_id != prev_mode_id) {
+            vernie_macro_stop(&g_macro);
+        }
+        prev_mode_id = g_rt.ctrl.mode_id;
 
-        // 5. Poll native SPI1 LIS3DH IMU (fused with real track motion & stall state).
+        // 4. Compute effective actuation target: Macro Engine -> Autonomous Brain -> BLE Remote.
+        vernie_control_state_t eff = g_rt.ctrl;
+        bool alert_led_this_tick = false;
+        vernie_led_cmd_t alert_led = { 0 };
+
+        // Manual BLE drive always pre-empts a running macro immediately for safety.
+        if (g_macro.playing && g_rt.ctrl.drive_active) {
+            vernie_macro_stop(&g_macro);
+        }
+
+        if (g_macro.playing) {
+            vernie_modes_notify_preempted(&g_modes);
+            vernie_macro_output_t mout;
+            vernie_macro_tick(&g_macro, g_rt.ctrl.safe_mode, g_imu.picked_up, now_ms, &mout);
+            if (mout.active) {
+                eff.drive_active = mout.drive_active;
+                eff.drive_left = mout.drive_left;
+                eff.drive_right = mout.drive_right;
+                if (mout.head_cmd) {
+                    eff.head_cmd_pending = true;
+                    eff.head_target_deg = mout.head_angle_deg;
+                    eff.head_speed = mout.head_speed;
+                }
+                if (mout.synth_cmd) {
+                    (void)vernie_synth_command(
+                        &g_synth, mout.synth_voice, mout.synth_preset_or_note, mout.synth_dur_ms, now_ms
+                    );
+                }
+                if (mout.hub_led_cmd) {
+                    g_rt.ctrl.led_override = true;
+                    g_rt.ctrl.hub_r = mout.hub_r;
+                    g_rt.ctrl.hub_g = mout.hub_g;
+                    g_rt.ctrl.hub_b = mout.hub_b;
+                }
+                if (mout.chest_led_cmd) {
+                    // Persist on g_rt.ctrl so LUMP UART PBIO_ERROR_AGAIN retries cleanly next tick.
+                    g_rt.ctrl.chest_led = mout.chest_led;
+                    g_rt.ctrl.chest_led_dirty = true;
+                    eff.chest_led = mout.chest_led;
+                    eff.chest_led_dirty = true;
+                }
+            }
+        } else {
+            vernie_mode_input_t min = {
+                .mode_id = g_rt.ctrl.mode_id,
+                .safe_mode = g_rt.ctrl.safe_mode,
+                .picked_up = g_imu.picked_up,
+                .bump = g_imu.bump_detected,
+                .head_homed = g_hw.head_fsm.homed,
+                .dart_armed = g_rt.ctrl.dart_armed,
+                .sensor_ok = g_hw.sensor.sensor_ok,
+                .distance_pct = g_hw.sensor.distance_pct,
+                .color_id = g_hw.sensor.color_id,
+                .has_saved_macro = (g_macro.len >= VERNIE_MACRO_STEP_BYTES),
+            };
+            vernie_mode_output_t aout;
+            vernie_modes_tick(&g_modes, &min, now_ms, &aout);
+            if (aout.chest_led_cmd) {
+                g_rt.ctrl.chest_led = aout.chest_led;
+                g_rt.ctrl.chest_led_dirty = true;
+                eff.chest_led = aout.chest_led;
+                eff.chest_led_dirty = true;
+            }
+            if (aout.active) {
+                eff.drive_active = aout.drive_active;
+                eff.drive_left = aout.drive_left;
+                eff.drive_right = aout.drive_right;
+                if (aout.head_cmd) {
+                    eff.head_cmd_pending = true;
+                    eff.head_target_deg = aout.head_angle_deg;
+                    eff.head_speed = aout.head_speed;
+                }
+                if (aout.want_dart_fire) {
+                    eff.dart_fire_requested = true;
+                }
+                if (aout.synth_cmd) {
+                    (void)vernie_synth_command(
+                        &g_synth, aout.synth_voice, aout.synth_preset_or_note, aout.synth_dur_ms, now_ms
+                    );
+                }
+                if (aout.hub_led_alert) {
+                    alert_led_this_tick = true;
+                    alert_led.kind = VERNIE_LED_KIND_RGB;
+                    alert_led.a = aout.alert_r;
+                    alert_led.b = aout.alert_g;
+                    alert_led.c = aout.alert_b;
+                }
+                if (aout.want_macro_play) {
+                    (void)vernie_macro_start(&g_macro, now_ms);
+                }
+            }
+        }
+
+        // 5. Step motors, Port C/D auto-detect, head homing/dart FSM, and 88007 sensor.
+        vernie_hw_snapshot_t snap;
+        vernie_hw_step(&g_hw, &eff, &g_synth, g_imu.picked_up, now_ms, &snap);
+
+        // Propagate hardware consumption & auto-disarm flags back to authoritative control state.
+        if (!eff.dart_armed)           g_rt.ctrl.dart_armed = false;
+        if (!eff.dart_fire_requested)  g_rt.ctrl.dart_fire_requested = false;
+        if (!eff.head_home_requested)  g_rt.ctrl.head_home_requested = false;
+        if (!eff.head_cmd_pending)     g_rt.ctrl.head_cmd_pending = false;
+        if (!eff.chest_led_dirty)      g_rt.ctrl.chest_led_dirty = false;
+
+        // 6. Poll native SPI1 LIS3DH IMU (fused with real track motion & stall state).
         (void)vernie_imu_poll(&g_imu, snap.tracks_moving, snap.tracks_stalled, now_ms);
         bool tap_event = vernie_imu_consume_tap_event(&g_imu);
 
@@ -197,7 +332,7 @@ static pbio_error_t vernie_os_thread(pbio_os_state_t *state, void *context) {
         snap.tap = tap_event || (g_imu.tap_hold_until_ms != 0u && (int32_t)(now_ms - g_imu.tap_hold_until_ms) < 0);
         snap.synth_active = vernie_synth_is_active(&g_synth);
 
-        // 6. Step runtime state machine (BLE advertising, mode cycling, LED caching, 10 Hz telemetry).
+        // 7. Step runtime state machine (BLE advertising, mode cycling, LED caching, 10 Hz telemetry).
         vernie_tick_actions_t actions;
         vernie_runtime_tick(
             &g_rt,
@@ -216,17 +351,24 @@ static pbio_error_t vernie_os_thread(pbio_os_state_t *state, void *context) {
         if (actions.need_clear_pending) {
             tx_in_flight = false;
             pbsys_host_app_data_clear_pending();
+            vernie_macro_stop(&g_macro);
             vernie_synth_stop_all(&g_synth);
             vernie_hw_coast_all(&g_hw);
         }
 
         if (actions.mode_cycled && !g_rt.ctrl.safe_mode) {
+            vernie_macro_stop(&g_macro);
             (void)vernie_synth_command(
                 &g_synth, VERNIE_SYNTH_VOICE_BOTH, VERNIE_SFX_MODE_TICK, 0u, now_ms
             );
         }
 
-        if (actions.led_changed) {
+        if (alert_led_this_tick) {
+            vernie_apply_led(&alert_led);
+            pickup_alert_led_active = true;
+            g_rt.led_initialized = false; // Force normal LED refresh as soon as pickup clears.
+        } else if (actions.led_changed || pickup_alert_led_active) {
+            pickup_alert_led_active = false;
             vernie_apply_led(&actions.led);
         }
 
@@ -251,12 +393,13 @@ static pbio_error_t vernie_os_thread(pbio_os_state_t *state, void *context) {
             }
         }
 
-        // 7. Flush dirty FLASH_USER_1 calibration/macros ONLY when motors & synth are idle.
+        // 8. Flush dirty FLASH_USER_1 calibration/macros ONLY when motors & synth are idle.
         if (g_storage.dirty && !snap.motors_active && !snap.synth_active) {
             (void)vernie_storage_try_flush(&g_storage, false);
         }
     }
 
+    vernie_macro_stop(&g_macro);
     vernie_synth_stop_all(&g_synth);
     vernie_hw_coast_all(&g_hw);
     (void)vernie_storage_try_flush(&g_storage, false);
@@ -279,6 +422,8 @@ void pbsys_main_run_program(pbsys_main_program_t *program) {
     }
 
     vernie_hw_init(&g_hw, g_storage.blob.head_home_offset_deg);
+    vernie_macro_init(&g_macro, &g_storage.blob);
+    vernie_modes_init(&g_modes);
 
     vernie_synth_hal_t synth_hal = vernie_synth_stm32_hal(vernie_hw_coast_tracks, vernie_hw_coast_external);
     vernie_synth_init(&g_synth, &synth_hal, g_storage.blob.synth_volume_pct);

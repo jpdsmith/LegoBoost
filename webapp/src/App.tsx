@@ -78,13 +78,23 @@ export const App: React.FC = () => {
     }
   };
 
+  const runBleThrowing = async (fn: () => Promise<void>) => {
+    setBleError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setBleError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  };
+
   return (
     <div className="shell">
       <header className="topbar">
         <div>
           <h1>Vernie OS Cockpit</h1>
           <p className="subtitle">
-            Custom native-C LEGO® BOOST Move Hub firmware · Phase 2 Hardware Drivers &amp; 2-Voice Synth
+            Custom native-C LEGO® BOOST Move Hub firmware · Phase 3 Autonomous Brain &amp; Flash Macro Engine
           </p>
         </div>
         <span className={`status-dot status-${connState}`}>
@@ -128,6 +138,10 @@ export const App: React.FC = () => {
           onSetChestLed={(s) => void runBle(() => client.sendChestLed(s))}
           onSetMode={(m) => void runBle(() => client.sendSetMode(m))}
           onDartSubcmd={(s) => void runBle(() => client.sendDart(s))}
+          onUploadMacro={(steps, opts) => runBleThrowing(() => client.uploadMacro(steps, opts))}
+          onPlayMacro={() => runBleThrowing(() => client.playMacro())}
+          onStopMacro={() => runBleThrowing(() => client.stopMacro())}
+          onClearMacro={() => runBleThrowing(() => client.clearMacro(true))}
         />
       </main>
     </div>

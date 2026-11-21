@@ -164,6 +164,11 @@ typedef struct {
     uint8_t synth_voice;
     uint8_t synth_preset_or_note;
     uint16_t synth_dur_ms;
+    bool macro_cmd_pending;
+    uint8_t macro_subcmd;
+    uint8_t macro_offset;
+    uint8_t macro_data_len;
+    uint8_t macro_data[VERNIE_MACRO_CHUNK_MAX];
 } vernie_control_state_t;
 
 void vernie_control_init(vernie_control_state_t *st, bool safe_mode);

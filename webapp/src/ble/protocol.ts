@@ -170,6 +170,92 @@ export function encodeSetMode(modeId: number): Uint8Array {
   return new Uint8Array([Opcode.SET_MODE, clamp(modeId, 0, 4, 0)]);
 }
 
+export const MacroSubcmd = {
+  CLEAR: 0,
+  WRITE_CHUNK: 1,
+  PLAY: 2,
+  STOP: 3,
+  SAVE: 4,
+} as const;
+
+export const MacroStepOp = {
+  DRIVE: 1,
+  HEAD: 2,
+  SYNTH: 3,
+  LED: 4,
+  WAIT: 5,
+} as const;
+
+export const MACRO_STEP_BYTES = 5;
+export const MACRO_MAX_BYTES = 232;
+export const MACRO_MAX_STEPS = Math.floor(MACRO_MAX_BYTES / MACRO_STEP_BYTES);
+
+export interface MacroStep {
+  op: number;
+  arg0: number;
+  arg1: number;
+  durMs: number;
+}
+
+const VALID_MACRO_OPS = new Set<number>(Object.values(MacroStepOp));
+
+export function encodeMacroSteps(steps: MacroStep[]): Uint8Array {
+  if (steps.length > MACRO_MAX_STEPS) {
+    throw new RangeError(
+      `Macro has ${steps.length} steps; maximum is ${MACRO_MAX_STEPS} (${MACRO_MAX_BYTES} bytes)`
+    );
+  }
+  const buf = new Uint8Array(steps.length * MACRO_STEP_BYTES);
+  const view = new DataView(buf.buffer);
+  steps.forEach((step, idx) => {
+    if (!VALID_MACRO_OPS.has(step.op)) {
+      throw new RangeError(`Invalid macro step opcode ${step.op} at index ${idx}`);
+    }
+    const off = idx * MACRO_STEP_BYTES;
+    buf[off] = step.op & 0xff;
+    let durMax = 5000;
+    if (step.op === MacroStepOp.DRIVE) {
+      view.setInt8(off + 1, clamp(step.arg0, -100, 100, 0));
+      view.setInt8(off + 2, clamp(step.arg1, -100, 100, 0));
+    } else if (step.op === MacroStepOp.HEAD) {
+      view.setInt8(off + 1, clamp(step.arg0, -40, 35, 0));
+      buf[off + 2] = clamp(step.arg1, 10, 100, 50);
+    } else if (step.op === MacroStepOp.SYNTH) {
+      buf[off + 1] = clamp(step.arg0, 0, 2, 0);
+      buf[off + 2] = clamp(step.arg1, 0, 255, 0);
+      durMax = 3000;
+    } else if (step.op === MacroStepOp.LED) {
+      buf[off + 1] = clamp(step.arg0, 0, 1, 0);
+      buf[off + 2] = clamp(step.arg1, 0, 255, 0);
+    } else {
+      buf[off + 1] = 0;
+      buf[off + 2] = 0;
+    }
+    view.setUint16(off + 3, clamp(step.durMs, 50, durMax, 250), true);
+  });
+  return buf;
+}
+
+export function splitMacroIntoChunks(
+  bytecode: Uint8Array,
+  maxChunkBytes = 10
+): Array<{ offset: number; data: Uint8Array }> {
+  if (bytecode.length > MACRO_MAX_BYTES) {
+    throw new RangeError(`Macro bytecode length ${bytecode.length} exceeds ${MACRO_MAX_BYTES} bytes`);
+  }
+  if (maxChunkBytes < 1 || maxChunkBytes > MACRO_CHUNK_MAX_DATA_BYTES) {
+    throw new RangeError(`Chunk size ${maxChunkBytes} outside [1, ${MACRO_CHUNK_MAX_DATA_BYTES}]`);
+  }
+  const chunks: Array<{ offset: number; data: Uint8Array }> = [];
+  for (let offset = 0; offset < bytecode.length; offset += maxChunkBytes) {
+    chunks.push({
+      offset,
+      data: bytecode.slice(offset, Math.min(bytecode.length, offset + maxChunkBytes)),
+    });
+  }
+  return chunks;
+}
+
 export function encodeMacroChunk(subcmd: number, offset: number, data: Uint8Array): Uint8Array {
   if (data.length > MACRO_CHUNK_MAX_DATA_BYTES) {
     throw new RangeError(`Macro chunk exceeds ${MACRO_CHUNK_MAX_DATA_BYTES} bytes`);

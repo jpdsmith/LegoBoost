@@ -15,10 +15,14 @@ import {
   encodeHead,
   encodeHubLed,
   encodeMacroChunk,
+  encodeMacroSteps,
   encodeSetMode,
   encodeSynth,
   L1_CMD_REBOOT_TO_UPDATE_MODE,
   L1_EVENT_WRITE_APP_DATA,
+  MacroStepOp,
+  MacroSubcmd,
+  splitMacroIntoChunks,
   unwrapPybricksEventNotification,
   wrapPybricksAppData,
 } from "./protocol";
@@ -286,5 +290,66 @@ describe("Layer 4 — Coalescing GATT Scheduler & VernieClient Resilience (T4.2)
     await client.attachCharacteristic(fastChar, "VernieOS");
     await client.sendChestLed(ChestLedState.BLUE);
     expect(writes[0]).toEqual([0x07, 0x00, 0x00, 0x05, 0x01, 0x03, 0x00, 0x00]);
+  });
+
+  it("Phase 3: encodes 5-byte macro steps, chunks <=14B, and uploads CLEAR -> WRITE_CHUNK -> SAVE -> PLAY in strict order", async () => {
+    const writes: number[][] = [];
+    const mockChar: BleCharacteristicLike = {
+      writeValueWithResponse: async (buf) => {
+        const u8 = toBytes(buf);
+        expect(u8.length).toBeLessThanOrEqual(20); // BlueNRG-MS ATT_MTU=23 ceiling!
+        writes.push(Array.from(u8));
+      },
+      startNotifications: async () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+
+    const client = new VernieClient();
+    await client.attachCharacteristic(mockChar, "VernieOS");
+
+    // 3 steps = 15 bytes -> splits into 10B chunk @ offset 0 and 5B chunk @ offset 10
+    const steps = [
+      { op: MacroStepOp.DRIVE, arg0: 50, arg1: -50, durMs: 400 },
+      { op: MacroStepOp.HEAD, arg0: 99, arg1: 70, durMs: 300 }, // clamps +99 -> +35
+      { op: MacroStepOp.SYNTH, arg0: 1, arg1: 7, durMs: 5000 }, // clamps 5000 -> 3000 thermal cap
+    ];
+    const encoded = encodeMacroSteps(steps);
+    expect(encoded.length).toBe(15);
+    expect(Array.from(encoded)).toEqual([
+      1, 50, 206, 0x90, 0x01, // DRIVE(50, -50, 400ms)
+      2, 35, 70, 0x2c, 0x01,  // HEAD(clamped +35, 70%, 300ms)
+      3, 1, 7, 0xb8, 0x0b,    // SYNTH(v1, preset 7, clamped 3000ms)
+    ]);
+
+    expect(() => encodeMacroSteps([{ op: 99, arg0: 0, arg1: 0, durMs: 100 }])).toThrow(RangeError);
+    expect(() =>
+      encodeMacroSteps(Array.from({ length: 47 }, () => ({ op: MacroStepOp.WAIT, arg0: 0, arg1: 0, durMs: 100 })))
+    ).toThrow(RangeError);
+
+    const chunks = splitMacroIntoChunks(encoded, 10);
+    expect(chunks.map((c) => [c.offset, c.data.length])).toEqual([
+      [0, 10],
+      [10, 5],
+    ]);
+
+    await client.uploadMacro(steps, { saveToFlash: true, playAfter: true });
+    // Expected writes: CLEAR, CHUNK@0 (10B), CHUNK@10 (5B), SAVE, PLAY
+    expect(writes).toEqual([
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.CLEAR, 0],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.WRITE_CHUNK, 0, ...Array.from(encoded.slice(0, 10))],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.WRITE_CHUNK, 10, ...Array.from(encoded.slice(10, 15))],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.SAVE, 0],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.PLAY, 0],
+    ]);
+
+    writes.length = 0;
+    await client.stopMacro();
+    await client.clearMacro(true);
+    expect(writes).toEqual([
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.STOP, 0],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.CLEAR, 0],
+      [0x07, 0x00, 0x00, 0x07, MacroSubcmd.SAVE, 0],
+    ]);
   });
 });

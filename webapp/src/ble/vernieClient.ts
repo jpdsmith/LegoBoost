@@ -9,10 +9,15 @@ import {
   encodeDrive,
   encodeHead,
   encodeHubLed,
+  encodeMacroChunk,
+  encodeMacroSteps,
   encodeSetMode,
   encodeSynth,
+  MacroStep,
+  MacroSubcmd,
   PYBRICKS_COMMAND_EVENT_CHAR_UUID,
   PYBRICKS_SERVICE_UUID,
+  splitMacroIntoChunks,
   TelemetryFrame,
   unwrapPybricksEventNotification,
   wrapPybricksAppData,
@@ -320,6 +325,45 @@ export class VernieClient {
   sendSetMode(modeId: number): Promise<void> {
     if (!this.writer) return Promise.reject(new Error("Not connected"));
     return this.writer.enqueueReliable(wrapPybricksAppData(encodeSetMode(modeId)));
+  }
+
+  sendMacroOp(subcmd: number, offset = 0, data: Uint8Array = new Uint8Array(0)): Promise<void> {
+    if (!this.writer) return Promise.reject(new Error("Not connected"));
+    return this.writer.enqueueReliable(wrapPybricksAppData(encodeMacroChunk(subcmd, offset, data)));
+  }
+
+  async uploadMacro(
+    steps: MacroStep[],
+    options: { saveToFlash?: boolean; playAfter?: boolean } = {}
+  ): Promise<void> {
+    if (!this.writer) throw new Error("Not connected");
+    const bytecode = encodeMacroSteps(steps);
+    const chunks = splitMacroIntoChunks(bytecode, 10);
+    await this.sendMacroOp(MacroSubcmd.CLEAR);
+    for (const chunk of chunks) {
+      await this.sendMacroOp(MacroSubcmd.WRITE_CHUNK, chunk.offset, chunk.data);
+    }
+    if (options.saveToFlash) {
+      await this.sendMacroOp(MacroSubcmd.SAVE);
+    }
+    if (options.playAfter) {
+      await this.sendMacroOp(MacroSubcmd.PLAY);
+    }
+  }
+
+  playMacro(): Promise<void> {
+    return this.sendMacroOp(MacroSubcmd.PLAY);
+  }
+
+  stopMacro(): Promise<void> {
+    return this.sendMacroOp(MacroSubcmd.STOP);
+  }
+
+  async clearMacro(saveToFlash = true): Promise<void> {
+    await this.sendMacroOp(MacroSubcmd.CLEAR);
+    if (saveToFlash) {
+      await this.sendMacroOp(MacroSubcmd.SAVE);
+    }
   }
 
   async rebootToBootloader(): Promise<void> {

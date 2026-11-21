@@ -34,7 +34,7 @@ function sampleTelemetry(overrides: Partial<TelemetryFrame> = {}): TelemetryFram
   };
 }
 
-describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
+describe("TelemetryHud UI safety, Phase 2 hardware diagnostics & Phase 3 Flash Macros", () => {
   const baseProps = {
     bleSupported: true,
     connectionState: "connected" as const,
@@ -51,17 +51,23 @@ describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
     onSetChestLed: vi.fn(),
     onSetMode: vi.fn(),
     onDartSubcmd: vi.fn(),
+    onUploadMacro: vi.fn().mockResolvedValue(undefined),
+    onPlayMacro: vi.fn().mockResolvedValue(undefined),
+    onStopMacro: vi.fn().mockResolvedValue(undefined),
+    onClearMacro: vi.fn().mockResolvedValue(undefined),
   };
 
-  it("keeps Mode, Drive, Head, Synth, and Arm controls disabled until first telemetry confirms !safeMode", () => {
+  it("keeps Mode, Drive, Head, Synth, Macro, and Arm controls disabled until first telemetry confirms !safeMode", () => {
     render(<TelemetryHud {...baseProps} telemetry={null} />);
     expect((screen.getByRole("button", { name: /^Arm Lock/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /1: Room Explorer/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /Home Head/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /Happy Chirp/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Upload & Play/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Save to Flash/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows Watchdog Safe Mode warning banner and locks out motion/arm/synth controls when SAFE_MODE flag is set", () => {
+  it("shows Watchdog Safe Mode warning banner and locks out motion/arm/synth/macro controls when SAFE_MODE flag is set", () => {
     render(
       <TelemetryHud
         {...baseProps}
@@ -71,17 +77,23 @@ describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
     expect(screen.getByText(/Watchdog Safe Mode Active/i)).toBeTruthy();
     expect((screen.getByRole("button", { name: /^Arm Lock/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /Fire Dart/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Upload & Play/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /Disarm Lock/i }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: /Stop Macro/i }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText(/7650 mV/i)).toBeTruthy();
   });
 
-  it("enforces Armed + Homed interlock on Fire Dart and dispatches Phase 2 hardware commands", () => {
+  it("enforces Armed + Homed interlock on Fire Dart and dispatches Phase 2 & Phase 3 commands", async () => {
     const onDrive = vi.fn();
     const onHead = vi.fn();
     const onSynth = vi.fn();
     const onSetChestLed = vi.fn();
     const onSetMode = vi.fn();
     const onDartSubcmd = vi.fn();
+    const onUploadMacro = vi.fn().mockResolvedValue(undefined);
+    const onPlayMacro = vi.fn().mockResolvedValue(undefined);
+    const onStopMacro = vi.fn().mockResolvedValue(undefined);
+    const onClearMacro = vi.fn().mockResolvedValue(undefined);
 
     // Armed but NOT homed -> Fire Dart MUST stay disabled!
     const { rerender } = render(
@@ -94,6 +106,10 @@ describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
         onSetChestLed={onSetChestLed}
         onSetMode={onSetMode}
         onDartSubcmd={onDartSubcmd}
+        onUploadMacro={onUploadMacro}
+        onPlayMacro={onPlayMacro}
+        onStopMacro={onStopMacro}
+        onClearMacro={onClearMacro}
       />
     );
     expect((screen.getByRole("button", { name: /Fire Dart/i }) as HTMLButtonElement).disabled).toBe(true);
@@ -118,6 +134,10 @@ describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
         onSetChestLed={onSetChestLed}
         onSetMode={onSetMode}
         onDartSubcmd={onDartSubcmd}
+        onUploadMacro={onUploadMacro}
+        onPlayMacro={onPlayMacro}
+        onStopMacro={onStopMacro}
+        onClearMacro={onClearMacro}
       />
     );
     expect(screen.getByText("PICKED UP")).toBeTruthy();
@@ -143,6 +163,23 @@ describe("TelemetryHud UI safety & Phase 2 hardware diagnostics", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /1: Room Explorer/i }));
     expect(onSetMode).toHaveBeenCalledWith(1);
+
+    // Phase 3 Flash Macro controls
+    fireEvent.click(screen.getByRole("button", { name: /Desk Patrol/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Save to Flash/i }));
+    await waitFor(() => {
+      expect(onUploadMacro).toHaveBeenCalledWith(expect.any(Array), { saveToFlash: true });
+      expect(screen.getByText(/Saved "Desk Patrol" to FLASH_USER_1/i)).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Play Saved/i }));
+    await waitFor(() => expect(onPlayMacro).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Stop Macro/i }));
+    await waitFor(() => expect(onStopMacro).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Clear Flash Macro/i }));
+    await waitFor(() => expect(onClearMacro).toHaveBeenCalledTimes(1));
   });
 });
 

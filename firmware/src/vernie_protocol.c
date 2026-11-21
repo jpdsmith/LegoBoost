@@ -277,8 +277,18 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
             return VERNIE_PARSE_OK;
 
         case VERNIE_OP_MACRO_OP:
+            if (cmd->u.macro_op.data_len > VERNIE_MACRO_CHUNK_MAX) {
+                return VERNIE_PARSE_ERR_LENGTH;
+            }
             if (st->safe_mode) {
                 return VERNIE_PARSE_ERR_INTERLOCK;
+            }
+            st->macro_cmd_pending = true;
+            st->macro_subcmd = cmd->u.macro_op.subcmd;
+            st->macro_offset = cmd->u.macro_op.offset;
+            st->macro_data_len = cmd->u.macro_op.data_len;
+            if (cmd->u.macro_op.data_len > 0u) {
+                memcpy(st->macro_data, cmd->u.macro_op.data, cmd->u.macro_op.data_len);
             }
             return VERNIE_PARSE_OK;
 
@@ -313,6 +323,7 @@ void vernie_control_on_disconnect(vernie_control_state_t *st) {
     st->dart_armed = false;
     st->dart_fire_requested = false;
     st->synth_cmd_pending = false;
+    st->macro_cmd_pending = false;
     st->led_override = false;
     if (st->mode_id == VERNIE_MODE_REMOTE) {
         st->mode_id = VERNIE_MODE_PET;

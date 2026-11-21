@@ -4,6 +4,10 @@ import {
   ChestLedState,
   DartSubcmd,
   HEAD_HOME_SENTINEL,
+  MACRO_MAX_BYTES,
+  MACRO_STEP_BYTES,
+  MacroStep,
+  MacroStepOp,
   MODE_NAMES,
   TelemetryFlag,
   TelemetryFrame,
@@ -26,6 +30,13 @@ interface TelemetryHudProps {
   onSetChestLed: (state: number) => void;
   onSetMode: (modeId: number) => void;
   onDartSubcmd: (subcmd: number) => void;
+  onUploadMacro: (
+    steps: MacroStep[],
+    options: { saveToFlash?: boolean; playAfter?: boolean }
+  ) => Promise<void>;
+  onPlayMacro: () => Promise<void>;
+  onStopMacro: () => Promise<void>;
+  onClearMacro: () => Promise<void>;
 }
 
 const LED_PRESETS: Array<{ name: string; r: number; g: number; b: number; hex: string }> = [
@@ -69,6 +80,57 @@ const LEGO_COLOR_NAMES: Record<number, string> = {
   10: "White",
 };
 
+export interface MacroPreset {
+  id: string;
+  label: string;
+  summary: string;
+  steps: MacroStep[];
+}
+
+export const MACRO_PRESETS: MacroPreset[] = [
+  {
+    id: "victory-dance",
+    label: "Victory Dance",
+    summary: "Emerald LED · Victory chiptune · Left/Right wiggle · Center head",
+    steps: [
+      { op: MacroStepOp.LED, arg0: 0, arg1: 2, durMs: 120 },
+      { op: MacroStepOp.SYNTH, arg0: 0, arg1: 7, durMs: 600 },
+      { op: MacroStepOp.HEAD, arg0: -30, arg1: 70, durMs: 300 },
+      { op: MacroStepOp.DRIVE, arg0: 50, arg1: -50, durMs: 400 },
+      { op: MacroStepOp.HEAD, arg0: 30, arg1: 70, durMs: 300 },
+      { op: MacroStepOp.DRIVE, arg0: -50, arg1: 50, durMs: 400 },
+      { op: MacroStepOp.HEAD, arg0: 0, arg1: 60, durMs: 250 },
+    ],
+  },
+  {
+    id: "desk-patrol",
+    label: "Desk Patrol",
+    summary: "Cyan LED · Short forward cruise · Left/Right scan · Return",
+    steps: [
+      { op: MacroStepOp.LED, arg0: 0, arg1: 0, durMs: 120 },
+      { op: MacroStepOp.DRIVE, arg0: 40, arg1: 40, durMs: 650 },
+      { op: MacroStepOp.HEAD, arg0: -35, arg1: 60, durMs: 450 },
+      { op: MacroStepOp.HEAD, arg0: 35, arg1: 60, durMs: 450 },
+      { op: MacroStepOp.HEAD, arg0: 0, arg1: 60, durMs: 250 },
+      { op: MacroStepOp.DRIVE, arg0: -40, arg1: -40, durMs: 650 },
+      { op: MacroStepOp.SYNTH, arg0: 0, arg1: 2, durMs: 350 },
+    ],
+  },
+  {
+    id: "r2-greeting",
+    label: "R2-D2 Greeting",
+    summary: "Orange LED · Boot chime · Friendly head nod · Curious beep",
+    steps: [
+      { op: MacroStepOp.LED, arg0: 0, arg1: 1, durMs: 120 },
+      { op: MacroStepOp.SYNTH, arg0: 0, arg1: 1, durMs: 500 },
+      { op: MacroStepOp.HEAD, arg0: 25, arg1: 65, durMs: 300 },
+      { op: MacroStepOp.HEAD, arg0: -25, arg1: 65, durMs: 300 },
+      { op: MacroStepOp.HEAD, arg0: 0, arg1: 65, durMs: 250 },
+      { op: MacroStepOp.SYNTH, arg0: 0, arg1: 3, durMs: 400 },
+    ],
+  },
+];
+
 export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   bleSupported,
   connectionState,
@@ -85,9 +147,32 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   onSetChestLed,
   onSetMode,
   onDartSubcmd,
+  onUploadMacro,
+  onPlayMacro,
+  onStopMacro,
+  onClearMacro,
 }) => {
   const [headSlider, setHeadSlider] = useState(0);
   const [synthVoice, setSynthVoice] = useState(0);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(MACRO_PRESETS[0].id);
+  const [macroBusy, setMacroBusy] = useState(false);
+  const [macroStatus, setMacroStatus] = useState<string | null>(null);
+
+  const selectedPreset =
+    MACRO_PRESETS.find((p) => p.id === selectedPresetId) ?? MACRO_PRESETS[0];
+
+  const runMacroAction = async (label: string, fn: () => Promise<void>) => {
+    setMacroBusy(true);
+    setMacroStatus(null);
+    try {
+      await fn();
+      setMacroStatus(label);
+    } catch {
+      // Error surfaced via parent bleError banner
+    } finally {
+      setMacroBusy(false);
+    }
+  };
 
   const safeMode = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SAFE_MODE));
   const dartArmed = Boolean(telemetry && (telemetry.flags & TelemetryFlag.DART_ARMED));
@@ -115,7 +200,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
     <section className="card">
       <div className="card-header">
         <div>
-          <h2>Live Vernie OS Telemetry &amp; Phase 2 Hardware Diagnostics</h2>
+          <h2>Live Vernie OS Telemetry &amp; Autonomous Cockpit</h2>
           <p className="subtitle">
             Pybricks GATT (<code>0xC5F50001</code>) · 18-byte AppData stream · 10 Hz live sensors.
           </p>
@@ -227,7 +312,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
       </div>
 
       <div className="diag-section">
-        <h3>Phase 2 Hardware Smoke Tests</h3>
+        <h3>Hardware Controls, Autonomous Modes &amp; Flash Macros</h3>
 
         <div className="diag-row">
           <span className="label">Track Drive Pulse (0x01, 400 ms dead-man):</span>
@@ -436,7 +521,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         </div>
 
         <div className="diag-row">
-          <span className="label">Mode Switch (0x06):</span>
+          <span className="label">Autonomous Brain Mode Switch (0x06 · or green button / double-tap torso):</span>
           <div className="swatch-row">
             {[0, 1, 2, 3, 4].map((m) => (
               <button
@@ -449,6 +534,75 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               </button>
             ))}
           </div>
+          <span className="meta">
+            0 Pet (hand-shy + pickup alarm) · 1 Explorer (IR+bump scan) · 2 Sentry (1.5 s lock, armed-only dart) · 3 Color Cards (G/R/B/Y ≥ 250 ms close) · 4 Remote
+          </span>
+        </div>
+
+        <div className="diag-row">
+          <span className="label">
+            Flash Macro Sequencer (0x07 → <code>FLASH_USER_1</code> · {selectedPreset.steps.length} steps ·{" "}
+            {selectedPreset.steps.length * MACRO_STEP_BYTES}/{MACRO_MAX_BYTES} B · no dart opcode):
+          </span>
+          <div className="swatch-row">
+            {MACRO_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                className={`btn btn-sm ${selectedPresetId === preset.id ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setSelectedPresetId(preset.id)}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <span className="meta">{selectedPreset.summary}</span>
+          <div className="swatch-row">
+            <button
+              className="btn btn-sm btn-secondary"
+              disabled={motionControlsDisabled || macroBusy}
+              onClick={() =>
+                void runMacroAction(`Playing "${selectedPreset.label}"`, () =>
+                  onUploadMacro(selectedPreset.steps, { playAfter: true })
+                )
+              }
+            >
+              Upload &amp; Play
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled || macroBusy}
+              onClick={() =>
+                void runMacroAction(
+                  `Saved "${selectedPreset.label}" to FLASH_USER_1 (Yellow card triggers offline!)`,
+                  () => onUploadMacro(selectedPreset.steps, { saveToFlash: true })
+                )
+              }
+            >
+              Save to Flash (Yellow Card)
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled || macroBusy}
+              onClick={() => void runMacroAction("Playing saved macro", onPlayMacro)}
+            >
+              Play Saved
+            </button>
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={connectionState !== "connected" || macroBusy}
+              onClick={() => void runMacroAction("Macro stopped", onStopMacro)}
+            >
+              Stop Macro
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled || macroBusy}
+              onClick={() => void runMacroAction("Cleared saved macro from FLASH_USER_1", onClearMacro)}
+            >
+              Clear Flash Macro
+            </button>
+          </div>
+          {macroStatus && <span className="meta">{macroStatus}</span>}
         </div>
       </div>
     </section>

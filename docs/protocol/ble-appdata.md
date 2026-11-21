@@ -58,6 +58,21 @@ BlueNRG-MS enforces `ATT_MTU = 23` (20-byte ATT payload) and **Write With Respon
 | `15..16` | `speed_a, speed_b` | `int8 × 2` | Active drive commands (`-100..+100`) |
 | `17` | `seq` | `uint8` | Rolling sequence number (`0..255`) |
 
+## Macro Engine (`0x07 MACRO_OP`) Subcommands & 5-Byte Step ISA
+
+Each `0x07` frame carries `[0x07, subcmd, offset, data[0..14]]` (max `17 B` RX payload) targeting the 232-byte staging buffer persisted to `FLASH_USER_1` (`0x0801F800`):
+
+- **Subcommands:** `0 = CLEAR`, `1 = WRITE_CHUNK` (`offset + data_len <= 232`, `1..14 B` payload), `2 = PLAY`, `3 = STOP`, `4 = SAVE` (commits CRC32-protected blob to `FLASH_USER_1` once motors & synth are idle).
+- **5-Byte Step Encoding** (up to **46 steps** = `230 B`; **no dart-fire opcode** by design):
+
+| Op | Name | `arg0` | `arg1` | `dur_ms` (`uint16_le`) | Safety Clamp |
+| :---: | :--- | :--- | :--- | :---: | :--- |
+| `1` | `DRIVE` | `int8 left` | `int8 right` | `50..5000` | Clamped `[-100, +100]`; aborts on pickup/safe mode |
+| `2` | `HEAD` | `int8 angle_deg` | `uint8 speed` | `50..5000` | Clamped `[-40, +35]` deg, speed `[10, 100]`% |
+| `3` | `SYNTH` | `uint8 voice (0..2)` | `uint8 note_or_preset` | `50..3000` | Hard-capped `<= 3000 ms` thermal limit |
+| `4` | `LED` | `0=Hub palette, 1=Chest` | Palette `0..5` or Chest `{0,3,5,9}` | `50..5000` | Invalid chest codes ignored |
+| `5` | `WAIT` | `0` | `0` | `50..5000` | Coasts tracks for `dur_ms` |
+
 # Examples
 
 Shared golden test vectors live in `tools/protocol_schema.json` and are asserted identically by `firmware/tests/test_vernie_protocol.c` and `webapp/src/ble/vernieClient.test.ts`.
