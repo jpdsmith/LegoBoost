@@ -146,7 +146,20 @@ static void test_c4_synth_cannot_corrupt_homing_and_pickup_plays_cleanly(void) {
     assert(mh.locked[VERNIE_SYNTH_VOICE_TRACKS] && mh.locked[VERNIE_SYNTH_VOICE_HEAD]);
     vernie_synth_stop_all(&synth);
 
-    // 3. Pickup reflex in Mode 0 Pet: head shakes (TIM3) AND alarm squawk plays on TIM1 without collision!
+    // 3. Mode 4 manual drive while tilted (picked_up == true) STILL holds TIM1 busy against synth!
+    ctrl.mode_id = VERNIE_MODE_REMOTE;
+    ctrl.drive_active = true;
+    ctrl.drive_left = 50;
+    ctrl.drive_right = 50;
+    env.picked_up = true;
+    assert(vernie_cmd_decode(synth_v1, sizeof(synth_v1), &cmd) == VERNIE_PARSE_OK);
+    assert(vernie_control_apply(&ctrl, &cmd, 300u) == VERNIE_PARSE_OK);
+    vernie_arbiter_step(&arb, &ctrl, &macro, &modes, &synth, &env, 300u, &out);
+    assert(out.eff.drive_active);
+    assert(!mh.locked[VERNIE_SYNTH_VOICE_TRACKS]);
+    ctrl.drive_active = false;
+
+    // 4. Pickup reflex in Mode 0 Pet: head shakes (TIM3) AND alarm squawk plays on TIM1 without collision!
     ctrl.mode_id = VERNIE_MODE_PET;
     env.picked_up = true;
     vernie_arbiter_step(&arb, &ctrl, &macro, &modes, &synth, &env, 500u, &out);

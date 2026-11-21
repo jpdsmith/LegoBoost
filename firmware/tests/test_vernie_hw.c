@@ -131,10 +131,34 @@ static void test_88007_spec1_decoding(void) {
     assert(col == 3u && dist == 100u);
 }
 
+static void test_remote_drive_ignores_pickup_orientation(void) {
+    vernie_control_state_t ctrl;
+    vernie_control_init(&ctrl, false);
+    ctrl.drive_active = true;
+    ctrl.drive_left = 50;
+    ctrl.drive_right = 50;
+
+    // Mode 4 (Remote Cockpit): manual tank drive MUST work regardless of IMU orientation!
+    ctrl.mode_id = VERNIE_MODE_REMOTE;
+    assert(vernie_hw_tracks_allowed(&ctrl, false));
+    assert(vernie_hw_tracks_allowed(&ctrl, true));
+
+    // Autonomous modes (Modes 0..3): pickup safety cutout still halts unattended tracks!
+    ctrl.mode_id = VERNIE_MODE_EXPLORER;
+    assert(vernie_hw_tracks_allowed(&ctrl, false));
+    assert(!vernie_hw_tracks_allowed(&ctrl, true));
+
+    // Watchdog Safe Mode: ALWAYS blocks tracks even in Remote mode!
+    ctrl.mode_id = VERNIE_MODE_REMOTE;
+    ctrl.safe_mode = true;
+    assert(!vernie_hw_tracks_allowed(&ctrl, false));
+}
+
 int main(void) {
     test_port_cd_auto_detection();
     test_non_trigger_head_homing_and_dart_interlock();
     test_88007_spec1_decoding();
+    test_remote_drive_ignores_pickup_orientation();
     printf("ALL VERNIE HW C UNIT TESTS PASSED.\n");
     return 0;
 }

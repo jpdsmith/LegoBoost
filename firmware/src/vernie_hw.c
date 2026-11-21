@@ -220,6 +220,16 @@ void vernie_head_fsm_step(
     }
 }
 
+bool vernie_hw_tracks_allowed(const vernie_control_state_t *ctrl, bool picked_up) {
+    if (!ctrl || !ctrl->drive_active || ctrl->safe_mode) {
+        return false;
+    }
+    if (picked_up && ctrl->mode_id != VERNIE_MODE_REMOTE) {
+        return false;
+    }
+    return true;
+}
+
 void vernie_sensor_decode_spec1(const int8_t raw[4], uint8_t *color_id_out, uint8_t *distance_pct_out) {
     // 88007 SPEC1 (mode 8): raw[0] = LEGO color ID (0..10 or -1=none), raw[1] = proximity 0..10 (or <0=N/A)
     uint8_t col = (raw[0] >= 0 && raw[0] <= 10) ? (uint8_t)raw[0] : 0u;
@@ -444,8 +454,8 @@ void vernie_hw_step(
         probe_all_ports(hw, synth);
     }
 
-    // 1. Differential Drive (Ports A & B) with Safe Mode & Pickup safety cutout.
-    bool want_drive = ctrl->drive_active && !ctrl->safe_mode && !picked_up;
+    // 1. Differential Drive (Ports A & B): Safe Mode always stops; IMU pickup only gates autonomous Modes 0..3.
+    bool want_drive = vernie_hw_tracks_allowed(ctrl, picked_up);
     if (want_drive) {
         if (synth) {
             vernie_synth_yield_voice(synth, VERNIE_SYNTH_VOICE_TRACKS);

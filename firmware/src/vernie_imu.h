@@ -49,8 +49,27 @@ typedef struct {
     void *ctx;
 } vernie_imu_bus_t;
 
+typedef enum {
+    VERNIE_IMU_UP_NEG_Y = 0, // Official Vernie upright (A/B bottom, C/D top -> raw_y ~= -1000 mg)
+    VERNIE_IMU_UP_POS_Y = 1, // Inverted vertical (A/B top, C/D bottom -> raw_y ~= +1000 mg)
+    VERNIE_IMU_UP_POS_Z = 2, // Flat horizontal (+Z up -> raw_z ~= +1000 mg)
+    VERNIE_IMU_UP_NEG_Z = 3, // Flat horizontal flipped (-Z up -> raw_z ~= -1000 mg)
+    VERNIE_IMU_UP_POS_X = 4, // Sideways (+X up -> raw_x ~= +1000 mg)
+    VERNIE_IMU_UP_NEG_X = 5, // Sideways (-X up -> raw_x ~= -1000 mg)
+} vernie_imu_up_axis_t;
+
+#define VERNIE_IMU_ORIENT_CALM_SAMPLES (8u)
+
 typedef struct {
     bool ready;
+    vernie_imu_up_axis_t up_axis;
+    bool orient_locked;
+    uint8_t calm_count;
+    vernie_imu_up_axis_t calm_candidate;
+    int16_t prev_raw_x_mg;
+    int16_t prev_raw_y_mg;
+    int16_t prev_raw_z_mg;
+    bool has_prev_raw;
     int8_t pitch_deg;
     int8_t roll_deg;
     int16_t pitch_zero_deg;

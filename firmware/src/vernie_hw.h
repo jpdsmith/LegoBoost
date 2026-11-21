@@ -128,6 +128,7 @@ typedef struct {
     uint8_t color_id;
 } vernie_sensor_state_t;
 
+bool vernie_hw_tracks_allowed(const vernie_control_state_t *ctrl, bool picked_up);
 void vernie_sensor_decode_spec1(const int8_t raw[4], uint8_t *color_id_out, uint8_t *distance_pct_out);
 
 /**

@@ -7,7 +7,7 @@ PBTOP      := $(TOP)/third_party/pybricks-micropython
 STM32LIB   := $(TOP)/third_party/stm32lib
 CMSIS6     := $(TOP)/third_party/CMSIS_6
 BUILD      := build
-FW_VERSION ?= vernie-os-0.3.1
+FW_VERSION ?= vernie-os-0.3.2
 HUB_NAME   ?= VernieOS
 
 CROSS_COMPILE ?= arm-none-eabi-

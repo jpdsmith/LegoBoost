@@ -28,7 +28,7 @@ sources:
   - Over-rotating past the shoulder mechanical stop trips the spring-loaded dart launcher.[^lego-boost-17101]
   - Because the 88008 motor only has a **relative encoder** (resets to `0°` at power-on), homing MUST run **strictly in the single non-trigger direction** at low torque (~25–30%), back off to calibrated center, and clamp normal poses to `[-40°, +35°]`.
   - Dart firing is **disarmed by default on boot** and requires explicit `ARM` + `FIRE` commands carrying magic byte `0xA5` (see [BLE AppData Protocol](../protocol/ble-appdata.md)).
-- **Vertical Torso Orientation:** The Move Hub sits upright inside Vernie's chest; Phase 2 LIS3DH tilt computation transforms raw accelerometer axes into Vernie's upright torso frame before evaluating `> 35°` pickup alarms.
+- **Hub Orientation & Pickup Detection:** Empirically verified on Move Hub 88006 silicon: `+Y` (`raw_y_mg ≈ +1000 mg`) points from Ports C/D toward Ports A/B, so official Vernie upright (A/B tracks at bottom, C/D at top) defaults to `-Y` (`VERNIE_IMU_UP_NEG_Y`). On power-on, `vernie_imu.c` automatically locks the resting orthogonal face (`±X/±Y/±Z`) after 8 consecutive calm stationary samples (~160 ms) so both vertical Vernie builds and flat horizontal rovers calibrate to `0° / 0° (UPRIGHT)` automatically, while enabling 3-axis double-tap (`CLICK_CFG = 0x2A`). Manual Remote Cockpit driving (`Mode 4`) is never blocked by IMU orientation; pickup cutout applies only to unattended autonomous Modes 0–3, macros, and dart firing.
 
 # 88007 Color & Distance Sensor Limits
 

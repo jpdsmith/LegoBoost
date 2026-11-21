@@ -71,14 +71,14 @@ bool vernie_imu_init(
     // CTRL_REG1: 200 Hz ODR (0x60) + XYZ enable (0x07) = 0x67
     // CTRL_REG2: HPCLICK = 1 (bit 2 = 0x04) so gravity doesn't saturate tap detector
     // CTRL_REG4: BDU = 1 (0x80) | ±2g (0x00) | High-Resolution 12-bit (0x08) = 0x88
-    // CLICK_CFG: ZD (Z-axis double-click, bit 5 = 0x20)
+    // CLICK_CFG: XD | YD | ZD (0x2A) so double-tap works in both vertical Vernie & flat rover builds
     // CLICK_THS: LIR_CLICK = 1 (0x80) | threshold 28 (~0.44g)
     // TIME_LIMIT: 10 (50 ms @ 200 Hz), TIME_LATENCY: 20 (100 ms), TIME_WINDOW: 60 (300 ms)
     bool ok = true;
     ok = ok && imu->bus.reg_write(LIS3DH_REG_CTRL_REG1, 0x67u, imu->bus.ctx);
     ok = ok && imu->bus.reg_write(LIS3DH_REG_CTRL_REG2, 0x04u, imu->bus.ctx);
     ok = ok && imu->bus.reg_write(LIS3DH_REG_CTRL_REG4, 0x88u, imu->bus.ctx);
-    ok = ok && imu->bus.reg_write(LIS3DH_REG_CLICK_CFG, 0x20u, imu->bus.ctx);
+    ok = ok && imu->bus.reg_write(LIS3DH_REG_CLICK_CFG, 0x2Au, imu->bus.ctx);
     ok = ok && imu->bus.reg_write(LIS3DH_REG_CLICK_THS, 0x80u | 28u, imu->bus.ctx);
     ok = ok && imu->bus.reg_write(LIS3DH_REG_TIME_LIMIT, 10u, imu->bus.ctx);
     ok = ok && imu->bus.reg_write(LIS3DH_REG_TIME_LATENCY, 20u, imu->bus.ctx);
@@ -86,6 +86,54 @@ bool vernie_imu_init(
 
     imu->ready = ok;
     return ok;
+}
+
+static void vernie_imu_project_axes(
+    vernie_imu_up_axis_t up_axis,
+    int16_t raw_x_mg,
+    int16_t raw_y_mg,
+    int16_t raw_z_mg,
+    int32_t *up_out,
+    int32_t *fwd_out,
+    int32_t *side_out
+) {
+    switch (up_axis) {
+        case VERNIE_IMU_UP_NEG_Y:
+            // Official Vernie upright (A/B tracks at bottom, C/D at top -> raw_y ~= -1000 mg).
+            *up_out = -(int32_t)raw_y_mg;
+            *fwd_out = (int32_t)raw_z_mg;
+            *side_out = (int32_t)raw_x_mg;
+            break;
+        case VERNIE_IMU_UP_POS_Y:
+            // Inverted vertical (A/B at top, C/D at bottom -> raw_y ~= +1000 mg).
+            *up_out = (int32_t)raw_y_mg;
+            *fwd_out = (int32_t)raw_z_mg;
+            *side_out = -(int32_t)raw_x_mg;
+            break;
+        case VERNIE_IMU_UP_POS_Z:
+            // Flat horizontal build (raw_z ~= +1000 mg).
+            *up_out = (int32_t)raw_z_mg;
+            *fwd_out = (int32_t)raw_y_mg;
+            *side_out = (int32_t)raw_x_mg;
+            break;
+        case VERNIE_IMU_UP_NEG_Z:
+            // Flat horizontal build flipped (raw_z ~= -1000 mg).
+            *up_out = -(int32_t)raw_z_mg;
+            *fwd_out = -(int32_t)raw_y_mg;
+            *side_out = (int32_t)raw_x_mg;
+            break;
+        case VERNIE_IMU_UP_POS_X:
+            *up_out = (int32_t)raw_x_mg;
+            *fwd_out = (int32_t)raw_z_mg;
+            *side_out = -(int32_t)raw_y_mg;
+            break;
+        case VERNIE_IMU_UP_NEG_X:
+        default:
+            *up_out = -(int32_t)raw_x_mg;
+            *fwd_out = (int32_t)raw_z_mg;
+            *side_out = (int32_t)raw_y_mg;
+            break;
+    }
 }
 
 void vernie_imu_process_sample(
@@ -102,13 +150,57 @@ void vernie_imu_process_sample(
         return;
     }
 
-    // Transform Move Hub PCB axes into Vernie's upright torso frame:
-    //   up_mg   = raw_y_mg (~+1000 mg when Vernie stands upright on tracks)
-    //   fwd_mg  = raw_z_mg (forward/backward through green button)
-    //   side_mg = raw_x_mg (left/right across tracks)
-    int32_t up_mg = (int32_t)raw_y_mg;
-    int32_t fwd_mg = (int32_t)raw_z_mg;
-    int32_t side_mg = (int32_t)raw_x_mg;
+    // Boot auto-orientation: once per power cycle, lock the dominant resting face (±X/±Y/±Z)
+    // after 8 consecutive calm stationary samples (~160 ms at 50 Hz) so both Vernie upright (-Y)
+    // and flat horizontal rover builds (±Z) automatically calibrate upright without manual setup.
+    if (!imu->orient_locked && !tracks_moving) {
+        int32_t ax = iabs32((int32_t)raw_x_mg);
+        int32_t ay = iabs32((int32_t)raw_y_mg);
+        int32_t az = iabs32((int32_t)raw_z_mg);
+        int32_t mag_sq = ax * ax + ay * ay + az * az;
+
+        int32_t max_a;
+        vernie_imu_up_axis_t cand;
+        if (ay >= ax && ay >= az) {
+            max_a = ay;
+            cand = (raw_y_mg < 0) ? VERNIE_IMU_UP_NEG_Y : VERNIE_IMU_UP_POS_Y;
+        } else if (az >= ax && az >= ay) {
+            max_a = az;
+            cand = (raw_z_mg >= 0) ? VERNIE_IMU_UP_POS_Z : VERNIE_IMU_UP_NEG_Z;
+        } else {
+            max_a = ax;
+            cand = (raw_x_mg >= 0) ? VERNIE_IMU_UP_POS_X : VERNIE_IMU_UP_NEG_X;
+        }
+
+        int32_t jitter = 0;
+        if (imu->has_prev_raw) {
+            jitter = iabs32((int32_t)raw_x_mg - (int32_t)imu->prev_raw_x_mg) +
+                     iabs32((int32_t)raw_y_mg - (int32_t)imu->prev_raw_y_mg) +
+                     iabs32((int32_t)raw_z_mg - (int32_t)imu->prev_raw_z_mg);
+        }
+
+        bool calm_face = (mag_sq >= 562500 && mag_sq <= 1690000) && (max_a >= 850) && (jitter < 120);
+        if (calm_face && (imu->calm_count == 0u || cand == imu->calm_candidate)) {
+            imu->calm_candidate = cand;
+            imu->calm_count++;
+            if (imu->calm_count >= VERNIE_IMU_ORIENT_CALM_SAMPLES) {
+                imu->up_axis = cand;
+                imu->orient_locked = true;
+                imu->picked_up = false;
+                imu->upright_since_ms = now_ms;
+                imu->has_prev_sample = false;
+            }
+        } else {
+            imu->calm_count = 0u;
+        }
+    }
+    imu->prev_raw_x_mg = raw_x_mg;
+    imu->prev_raw_y_mg = raw_y_mg;
+    imu->prev_raw_z_mg = raw_z_mg;
+    imu->has_prev_raw = true;
+
+    int32_t up_mg = 0, fwd_mg = 0, side_mg = 0;
+    vernie_imu_project_axes(imu->up_axis, raw_x_mg, raw_y_mg, raw_z_mg, &up_mg, &fwd_mg, &side_mg);
 
     int16_t pitch = (int16_t)(vernie_imu_atan2_deg(fwd_mg, up_mg) - imu->pitch_zero_deg);
     int16_t roll = (int16_t)(vernie_imu_atan2_deg(side_mg, up_mg) - imu->roll_zero_deg);
@@ -116,6 +208,8 @@ void vernie_imu_process_sample(
     imu->roll_deg = clamp_i8(roll, -127, 127);
 
     // 1. Pickup detection: torso tilt > 35 deg OR sustained vertical lift delta > 450 mg for >= 120 ms.
+    // While settling on a calm boot face (calm_count 1..7), avoid spurious pickup alarms on flat builds.
+    bool settling_boot_face = !imu->orient_locked && imu->calm_count > 0u;
     bool tilted = (iabs32(imu->pitch_deg) > VERNIE_IMU_PICKUP_TILT_DEG) ||
                   (iabs32(imu->roll_deg) > VERNIE_IMU_PICKUP_TILT_DEG);
 
@@ -133,7 +227,7 @@ void vernie_imu_process_sample(
         imu->lift_active = false;
     }
 
-    if (tilted || sustained_lift) {
+    if (!settling_boot_face && (tilted || sustained_lift)) {
         imu->picked_up = true;
         imu->upright_since_ms = now_ms;
     } else if (imu->picked_up) {

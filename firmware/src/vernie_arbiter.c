@@ -145,7 +145,9 @@ void vernie_arbiter_step(
 
     // C4: Update synth busy locks BEFORE dispatching any BLE/macro/mode synth commands so
     // synth NEVER hijacks active drive tracks, head homing, dart sweep, or same-tick head moves!
-    bool tracks_busy = out->eff.drive_active && !ctrl->safe_mode && !env->picked_up;
+    // Manual Remote Cockpit driving (Mode 4) works in any orientation (no IMU pickup cutout).
+    bool pickup_blocks_tracks = env->picked_up && (ctrl->mode_id != VERNIE_MODE_REMOTE);
+    bool tracks_busy = out->eff.drive_active && !ctrl->safe_mode && !pickup_blocks_tracks;
     bool head_busy = env->head_fsm_busy ||
                      out->eff.head_home_requested ||
                      out->eff.dart_fire_requested ||
