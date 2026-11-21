@@ -52,11 +52,14 @@ jobs:
       - name: Stage compiled firmware & verified manifest into Chromebook PWA public bundle
         run: |
           mkdir -p webapp/public/firmware
+          FW_VERSION=$(sed -n 's/^FW_VERSION[[:space:]]*?=[[:space:]]*//p' firmware/Makefile)
+          test -n "${FW_VERSION}"
+          echo "Staging firmware version: ${FW_VERSION}"
           /usr/bin/python3 tools/pack_firmware.py \
             --base-bin firmware/build/firmware-base.bin \
             --map-file firmware/build/firmware.elf.map \
             --elf-file firmware/build/firmware.elf \
-            --version vernie-os-0.3.1 \
+            --version "${FW_VERSION}" \
             --hub-name VernieOS \
             --out-zip webapp/public/firmware/firmware.zip \
             --out-bin webapp/public/firmware/firmware.bin \
