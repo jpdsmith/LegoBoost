@@ -403,3 +403,15 @@ a {
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
+
+.flag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.angle-slider {
+  width: 110px;
+  accent-color: var(--cyan);
+}

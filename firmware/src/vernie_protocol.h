@@ -153,11 +153,17 @@ typedef struct {
     uint8_t hub_g;
     uint8_t hub_b;
     uint8_t chest_led;
+    bool chest_led_dirty;
     uint8_t mode_id;
     bool dart_fire_requested;
     bool head_home_requested;
+    bool head_cmd_pending;
     int8_t head_target_deg;
     uint8_t head_speed;
+    bool synth_cmd_pending;
+    uint8_t synth_voice;
+    uint8_t synth_preset_or_note;
+    uint16_t synth_dur_ms;
 } vernie_control_state_t;
 
 void vernie_control_init(vernie_control_state_t *st, bool safe_mode);

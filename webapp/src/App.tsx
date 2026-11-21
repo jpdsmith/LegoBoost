@@ -84,7 +84,7 @@ export const App: React.FC = () => {
         <div>
           <h1>Vernie OS Cockpit</h1>
           <p className="subtitle">
-            Custom native-C LEGO® BOOST Move Hub firmware · Phase 1 Chromebook Bring-Up
+            Custom native-C LEGO® BOOST Move Hub firmware · Phase 2 Hardware Drivers &amp; 2-Voice Synth
           </p>
         </div>
         <span className={`status-dot status-${connState}`}>
@@ -121,7 +121,11 @@ export const App: React.FC = () => {
           error={bleError}
           onConnect={() => void runBle(() => client.connect())}
           onDisconnect={() => client.disconnect()}
+          onDrive={(l, r, t) => client.sendDrive(l, r, t)}
+          onHead={(deg, spd) => void runBle(() => client.sendHead(deg, spd))}
+          onSynth={(v, n, d) => void runBle(() => client.sendSynth(v, n, d))}
           onSetHubLed={(r, g, b) => void runBle(() => client.sendHubLed(r, g, b))}
+          onSetChestLed={(s) => void runBle(() => client.sendChestLed(s))}
           onSetMode={(m) => void runBle(() => client.sendSetMode(m))}
           onDartSubcmd={(s) => void runBle(() => client.sendDart(s))}
         />

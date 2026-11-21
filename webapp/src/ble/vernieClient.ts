@@ -4,11 +4,13 @@
 
 import {
   buildRebootToUpdateModeCommand,
+  encodeChestLed,
   encodeDart,
   encodeDrive,
   encodeHead,
   encodeHubLed,
   encodeSetMode,
+  encodeSynth,
   PYBRICKS_COMMAND_EVENT_CHAR_UUID,
   PYBRICKS_SERVICE_UUID,
   TelemetryFrame,
@@ -45,6 +47,7 @@ export class CoalescingGattWriter {
     data: Uint8Array;
     resolve: () => void;
     reject: (err: unknown) => void;
+    onStart?: () => void;
   }> = [];
   private disposed = false;
 
@@ -59,12 +62,12 @@ export class CoalescingGattWriter {
     void this.pump();
   }
 
-  enqueueReliable(data: Uint8Array): Promise<void> {
+  enqueueReliable(data: Uint8Array, onStart?: () => void): Promise<void> {
     if (this.disposed) {
       return Promise.reject(new Error("BLE client is disconnected"));
     }
     return new Promise<void>((resolve, reject) => {
-      this.fifoQueue.push({ data, resolve, reject });
+      this.fifoQueue.push({ data, resolve, reject, onStart });
       void this.pump();
     });
   }
@@ -86,6 +89,7 @@ export class CoalescingGattWriter {
         if (this.fifoQueue.length > 0) {
           const item = this.fifoQueue.shift()!;
           try {
+            item.onStart?.();
             await this.writeFn(item.data);
             item.resolve();
           } catch (err) {
@@ -120,8 +124,8 @@ function isExpectedRebootDisconnectError(err: unknown): boolean {
   }
   const msg = err.message.toLowerCase();
   return (
-    msg.includes("gatt") ||
-    msg.includes("disconnect") ||
+    msg.includes("disconnected") ||
+    msg.includes("gatt server is disconnected") ||
     msg.includes("network") ||
     msg.includes("closed")
   );
@@ -303,6 +307,16 @@ export class VernieClient {
     return this.writer.enqueueReliable(wrapPybricksAppData(encodeHubLed(r, g, b)));
   }
 
+  sendChestLed(state: number): Promise<void> {
+    if (!this.writer) return Promise.reject(new Error("Not connected"));
+    return this.writer.enqueueReliable(wrapPybricksAppData(encodeChestLed(state)));
+  }
+
+  sendSynth(voice: number, presetOrNote: number, durMs = 300): Promise<void> {
+    if (!this.writer) return Promise.reject(new Error("Not connected"));
+    return this.writer.enqueueReliable(wrapPybricksAppData(encodeSynth(voice, presetOrNote, durMs)));
+  }
+
   sendSetMode(modeId: number): Promise<void> {
     if (!this.writer) return Promise.reject(new Error("Not connected"));
     return this.writer.enqueueReliable(wrapPybricksAppData(encodeSetMode(modeId)));
@@ -313,11 +327,14 @@ export class VernieClient {
     // Pybricks L1 command [0x05] triggers NVIC_SystemReset() inside pbsys_handle_command()
     // BEFORE BlueNRG-MS sends the ATT Write Response, so Chrome typically rejects
     // writeValueWithResponse([0x05]) with NetworkError / GATT disconnected. Treat that
-    // disconnect as expected reboot success.
+    // disconnect as expected reboot success ONLY if the [0x05] write actually started.
+    let writeStarted = false;
     try {
-      await this.writer.enqueueReliable(buildRebootToUpdateModeCommand());
+      await this.writer.enqueueReliable(buildRebootToUpdateModeCommand(), () => {
+        writeStarted = true;
+      });
     } catch (err) {
-      if (!isExpectedRebootDisconnectError(err)) {
+      if (!writeStarted || !isExpectedRebootDisconnectError(err)) {
         throw err;
       }
     } finally {

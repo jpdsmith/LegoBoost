@@ -64,6 +64,7 @@ export const FirmwareUpdater: React.FC<FirmwareUpdaterProps> = ({
           return;
         }
         const actualSha = await sha256Hex(bytes);
+        if (controller.signal.aborted) return;
         if (actualSha && mData.bin_sha256 && actualSha !== mData.bin_sha256) {
           setError("Bundled firmware.bin SHA-256 does not match manifest.json!");
           return;
@@ -75,6 +76,12 @@ export const FirmwareUpdater: React.FC<FirmwareUpdaterProps> = ({
     })();
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (connectionState === "connected") {
+      setStep1Done(false);
+    }
+  }, [connectionState]);
 
   const handleFileUpload = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);

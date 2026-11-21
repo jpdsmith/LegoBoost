@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "vernie_hw.h"
 #include "vernie_protocol.h"
 
 #ifdef __cplusplus
@@ -17,7 +18,8 @@ extern "C" {
 
 #define VERNIE_BTN_SHORT_MIN_MS    (40u)
 #define VERNIE_BTN_SHORT_MAX_MS    (800u)
-#define VERNIE_ADV_RETRY_MS        (500u)
+#define VERNIE_ADV_RETRY_MS        (500u)  // Retry delay after boot/HCI busy failure
+#define VERNIE_ADV_GAP_RETRY_MS    (2500u) // Longer backoff on GAP-only connect (allows BlueZ GATT discovery)
 #define VERNIE_TELEMETRY_PERIOD_MS (100u)
 
 typedef enum {
@@ -56,6 +58,7 @@ typedef struct {
     bool led_changed;
     vernie_led_cmd_t led;
     bool send_telemetry;
+    bool mode_cycled;
 } vernie_tick_actions_t;
 
 void vernie_runtime_init(vernie_runtime_t *rt, bool safe_mode);
@@ -74,15 +77,19 @@ vernie_parse_result_t vernie_runtime_on_rx(
 
 /**
  * Advance Vernie OS runtime state by one cooperative tick and emit HAL actions.
+ * `hw_snap` supplies live Phase 2 sensor/IMU/encoder/synth telemetry (NULL uses battery_mv fallback).
  */
 void vernie_runtime_tick(
     vernie_runtime_t *rt,
     uint32_t now_ms,
     bool host_connected,
     bool adv_is_active,
+    bool adv_in_flight,
     bool btn_pressed,
+    bool imu_tap_event,
     bool tx_in_flight,
     uint16_t batt_mv,
+    const vernie_hw_snapshot_t *hw_snap,
     vernie_tick_actions_t *actions
 );
 

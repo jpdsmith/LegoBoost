@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Layer 4 Tests (T4.3): Simulated LWP3 Move Hub bootloader flashing, XOR checksum & error validation.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BootloaderCmd,
   BootloaderGattCharLike,
   BootloaderMessageKind,
   computeBootloaderXorChecksum,
+  flashMoveHubViaWebBluetooth,
   flashOverBootloaderChar,
   MOVE_HUB_CHECKSUM_SIZE,
   MOVE_HUB_DEVICE_ID,
@@ -279,5 +280,32 @@ describe("Layer 4 — LWP3 Move Hub Browser Flasher (T4.3)", () => {
     ).rejects.toThrow(/Mid-flash GATT disconnect/i);
 
     expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it("Second-review regression: removes gattserverdisconnected listener if device.gatt.connect() throws", async () => {
+    const addSpy = vi.fn();
+    const removeSpy = vi.fn();
+    vi.stubGlobal("navigator", {
+      bluetooth: {
+        requestDevice: vi.fn().mockResolvedValue({
+          addEventListener: addSpy,
+          removeEventListener: removeSpy,
+          gatt: {
+            connected: false,
+            connect: vi.fn().mockRejectedValue(new Error("GATT connect failed")),
+            disconnect: vi.fn(),
+          },
+        }),
+      },
+    });
+
+    try {
+      const fw = makeValidMoveHubFirmware(8);
+      await expect(flashMoveHubViaWebBluetooth(fw)).rejects.toThrow(/GATT connect failed/i);
+      expect(addSpy).toHaveBeenCalledWith("gattserverdisconnected", expect.any(Function));
+      expect(removeSpy).toHaveBeenCalledWith("gattserverdisconnected", addSpy.mock.calls[0][1]);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

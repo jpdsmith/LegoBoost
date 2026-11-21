@@ -242,4 +242,49 @@ describe("Layer 4 — Coalescing GATT Scheduler & VernieClient Resilience (T4.2)
     expect(disconnectSpy).toHaveBeenCalled();
     expect(client.getState()).toBe("disconnected");
   });
+
+  it("Second-review regression: rebootToBootloader rejects if BLE drops BEFORE [0x05] starts writing, and sends Phase 2 synth/chest commands", async () => {
+    const writes: number[][] = [];
+    let releaseFirstWrite!: () => void;
+    const mockChar: BleCharacteristicLike = {
+      writeValueWithResponse: async (buf) => {
+        const u8 = toBytes(buf);
+        writes.push(Array.from(u8));
+        if (writes.length === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirstWrite = resolve;
+          });
+        }
+      },
+      startNotifications: async () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+
+    const client = new VernieClient();
+    await client.attachCharacteristic(mockChar, "VernieOS");
+
+    // Start a slow write, queue reboot behind it, then disconnect BEFORE [0x05] starts!
+    const p1 = client.sendSynth(1, 69, 250);
+    const pReboot = client.rebootToBootloader();
+    client.disconnect();
+    releaseFirstWrite();
+
+    await expect(p1).resolves.toBeUndefined();
+    await expect(pReboot).rejects.toThrow(/BLE disconnected/i);
+
+    // Reconnect and verify sendChestLed wraps exact AppData bytes
+    writes.length = 0;
+    const fastChar: BleCharacteristicLike = {
+      writeValueWithResponse: async (buf) => {
+        writes.push(Array.from(toBytes(buf)));
+      },
+      startNotifications: async () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    await client.attachCharacteristic(fastChar, "VernieOS");
+    await client.sendChestLed(ChestLedState.BLUE);
+    expect(writes[0]).toEqual([0x07, 0x00, 0x00, 0x05, 0x01, 0x03, 0x00, 0x00]);
+  });
 });

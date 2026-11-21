@@ -200,9 +200,11 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
             st->head_speed = cmd->u.head.speed;
             if (cmd->u.head.is_home) {
                 st->head_home_requested = true;
+                st->head_cmd_pending = false;
                 st->head_target_deg = 0;
             } else {
                 st->head_home_requested = false;
+                st->head_cmd_pending = true;
                 st->head_target_deg = clamp_i8(cmd->u.head.angle_deg, VERNIE_HEAD_MIN_DEG, VERNIE_HEAD_MAX_DEG);
             }
             return VERNIE_PARSE_OK;
@@ -245,6 +247,7 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
                     return VERNIE_PARSE_ERR_VALUE;
                 }
                 st->chest_led = cmd->u.led.a;
+                st->chest_led_dirty = true;
                 return VERNIE_PARSE_OK;
             }
             return VERNIE_PARSE_ERR_VALUE;
@@ -267,6 +270,10 @@ vernie_parse_result_t vernie_control_apply(vernie_control_state_t *st, const ver
             if (st->safe_mode) {
                 return VERNIE_PARSE_ERR_INTERLOCK;
             }
+            st->synth_cmd_pending = true;
+            st->synth_voice = cmd->u.synth.voice;
+            st->synth_preset_or_note = cmd->u.synth.preset_or_note;
+            st->synth_dur_ms = cmd->u.synth.dur_ms;
             return VERNIE_PARSE_OK;
 
         case VERNIE_OP_MACRO_OP:
@@ -301,8 +308,11 @@ void vernie_control_on_disconnect(vernie_control_state_t *st) {
     st->drive_active = false;
     st->drive_left = 0;
     st->drive_right = 0;
+    st->head_home_requested = false;
+    st->head_cmd_pending = false;
     st->dart_armed = false;
     st->dart_fire_requested = false;
+    st->synth_cmd_pending = false;
     st->led_override = false;
     if (st->mode_id == VERNIE_MODE_REMOTE) {
         st->mode_id = VERNIE_MODE_PET;

@@ -78,9 +78,12 @@ void vernie_runtime_tick(
     uint32_t now_ms,
     bool host_connected,
     bool adv_is_active,
+    bool adv_in_flight,
     bool btn_pressed,
+    bool imu_tap_event,
     bool tx_in_flight,
     uint16_t batt_mv,
+    const vernie_hw_snapshot_t *hw_snap,
     vernie_tick_actions_t *actions
 ) {
     memset(actions, 0, sizeof(*actions));
@@ -101,16 +104,16 @@ void vernie_runtime_tick(
     }
 
     // 2. Detect GAP-only advertising drop (peer connected at link layer before CCCD subscribe).
-    //    Arm a 500 ms backoff so normal GATT discovery completes undisturbed, while aborted
-    //    or rapid GAP-only connections automatically resume advertising.
+    //    Use 2500 ms backoff so ChromeOS BlueZ GATT discovery completes undisturbed, while
+    //    aborted/rapid GAP-only connections still resume advertising automatically.
     if (!host_connected && !adv_is_active && rt->was_adv_active && !actions->need_clear_pending) {
         rt->adv_retry_armed = true;
-        rt->next_adv_retry_ms = now_ms + VERNIE_ADV_RETRY_MS;
+        rt->next_adv_retry_ms = now_ms + VERNIE_ADV_GAP_RETRY_MS;
     }
     rt->was_adv_active = adv_is_active;
 
-    // 3. Keep BLE advertising alive whenever no host is connected.
-    if (!host_connected && !adv_is_active) {
+    // 3. Keep BLE advertising alive whenever no host is connected (non-blocking).
+    if (!host_connected && !adv_is_active && !adv_in_flight) {
         if (!rt->adv_retry_armed || (int32_t)(now_ms - rt->next_adv_retry_ms) >= 0) {
             actions->need_start_adv = true;
             rt->adv_retry_armed = true;
@@ -121,23 +124,25 @@ void vernie_runtime_tick(
     // 4. Enforce drive dead-man failsafe timeout.
     (void)vernie_control_tick(&rt->ctrl, now_ms);
 
-    // 5. Green button: short press (40..799 ms) cycles standalone modes (0..3).
-    //    Long holds (>= 800 ms, e.g. aborted or completed 2s shutdown) do not cycle mode.
+    // 5. Green button short press (40..799 ms) OR stationary LIS3DH double-tap cycles modes 0..3.
+    bool short_press = false;
     if (btn_pressed && !rt->prev_btn_pressed) {
         rt->btn_press_start_ms = now_ms;
         rt->btn_hold_active = true;
     } else if (!btn_pressed && rt->prev_btn_pressed && rt->btn_hold_active) {
         uint32_t held_ms = now_ms - rt->btn_press_start_ms;
         rt->btn_hold_active = false;
-        if (held_ms >= VERNIE_BTN_SHORT_MIN_MS &&
-            held_ms < VERNIE_BTN_SHORT_MAX_MS &&
-            !rt->ctrl.safe_mode &&
-            !host_connected) {
-            rt->ctrl.mode_id = (uint8_t)((rt->ctrl.mode_id + 1u) % 4u);
-            rt->ctrl.led_override = false;
+        if (held_ms >= VERNIE_BTN_SHORT_MIN_MS && held_ms < VERNIE_BTN_SHORT_MAX_MS) {
+            short_press = true;
         }
     }
     rt->prev_btn_pressed = btn_pressed;
+
+    if ((short_press || imu_tap_event) && !rt->ctrl.safe_mode && !host_connected) {
+        rt->ctrl.mode_id = (uint8_t)((rt->ctrl.mode_id + 1u) % 4u);
+        rt->ctrl.led_override = false;
+        actions->mode_cycled = true;
+    }
 
     // 6. Compute LED target and emit update only when color actually changes.
     vernie_led_cmd_t desired_led = compute_led_cmd(&rt->ctrl, now_ms);
@@ -158,25 +163,31 @@ void vernie_runtime_tick(
         if (rt->ctrl.safe_mode) {
             flags |= VERNIE_FLAG_SAFE_MODE;
         }
-        if (btn_pressed) {
-            // Phase 1 bring-up diagnostic: surface live green-button press on TAP flag bit.
+        if (btn_pressed || (hw_snap && hw_snap->tap)) {
             flags |= VERNIE_FLAG_TAP;
+        }
+        if (hw_snap) {
+            if (hw_snap->picked_up)    flags |= VERNIE_FLAG_PICKED_UP;
+            if (hw_snap->bump)         flags |= VERNIE_FLAG_BUMP;
+            if (hw_snap->head_homed)   flags |= VERNIE_FLAG_HEAD_HOMED;
+            if (hw_snap->sensor_ok)    flags |= VERNIE_FLAG_SENSOR_OK;
+            if (hw_snap->synth_active) flags |= VERNIE_FLAG_SYNTH_ACTIVE;
         }
 
         vernie_telemetry_t t = {
-            .battery_mv = batt_mv,
-            .distance_pct = 0xFFu, // Phase 2 attaches 88007 sensor
-            .color_id = 0u,
-            .pitch_deg = 0,
-            .roll_deg = 0,
-            .flags = flags,
-            .mode_id = rt->ctrl.mode_id,
-            .enc_a = 0,
-            .enc_b = 0,
-            .head_deg = rt->ctrl.head_target_deg,
-            .speed_a = rt->ctrl.drive_left,
-            .speed_b = rt->ctrl.drive_right,
-            .seq = rt->telemetry_seq++,
+            .battery_mv   = hw_snap ? hw_snap->battery_mv : batt_mv,
+            .distance_pct = hw_snap ? hw_snap->distance_pct : 0xFFu,
+            .color_id     = hw_snap ? hw_snap->color_id : 0u,
+            .pitch_deg    = hw_snap ? hw_snap->pitch_deg : 0,
+            .roll_deg     = hw_snap ? hw_snap->roll_deg : 0,
+            .flags        = flags,
+            .mode_id      = rt->ctrl.mode_id,
+            .enc_a        = hw_snap ? hw_snap->enc_a : 0,
+            .enc_b        = hw_snap ? hw_snap->enc_b : 0,
+            .head_deg     = hw_snap ? hw_snap->head_deg : rt->ctrl.head_target_deg,
+            .speed_a      = hw_snap ? hw_snap->speed_a : rt->ctrl.drive_left,
+            .speed_b      = hw_snap ? hw_snap->speed_b : rt->ctrl.drive_right,
+            .seq          = rt->telemetry_seq++,
         };
 
         vernie_telemetry_encode(&t, rt->telemetry_buf);

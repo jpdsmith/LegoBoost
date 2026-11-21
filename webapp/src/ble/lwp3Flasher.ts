@@ -450,8 +450,8 @@ export async function flashMoveHubViaWebBluetooth(
   };
   device.addEventListener("gattserverdisconnected", onDisconnect);
 
-  const server = await device.gatt!.connect();
   try {
+    const server = await device.gatt!.connect();
     const service = await server.getPrimaryService(LWP3_BOOTLOADER_SERVICE_UUID);
     const char = await service.getCharacteristic(LWP3_BOOTLOADER_CHAR_UUID);
     return await flashOverBootloaderChar(char, firmware, onProgress, {

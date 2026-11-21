@@ -7,7 +7,7 @@ PBTOP      := $(TOP)/third_party/pybricks-micropython
 STM32LIB   := $(TOP)/third_party/stm32lib
 CMSIS6     := $(TOP)/third_party/CMSIS_6
 BUILD      := build
-FW_VERSION ?= vernie-os-0.1.0
+FW_VERSION ?= vernie-os-0.2.0
 HUB_NAME   ?= VernieOS
 
 CROSS_COMPILE ?= arm-none-eabi-
@@ -71,6 +71,10 @@ VERNIE_SRC_C := \
 	src/main.c \
 	src/vernie_protocol.c \
 	src/vernie_runtime.c \
+	src/vernie_synth.c \
+	src/vernie_imu.c \
+	src/vernie_storage.c \
+	src/vernie_hw.c \
 	src/string_minimal.c
 
 # --- Pure-MIT Pybricks lib/pbio + Move Hub Driver Sources (NO telemetry.c, NO block_device) ---
@@ -228,11 +232,12 @@ $(BUILD)/firmware.zip $(BUILD)/firmware.bin &: $(BUILD)/firmware-base.bin $(BUIL
 		--verify
 
 verify-gates: $(BUILD)/firmware.zip $(BUILD)/firmware.bin
-	$(PYTHON) $(TOP)/docs/references/attesters/attest_flash_ram.py --elf $(BUILD)/firmware.elf --map $(BUILD)/firmware.elf.map --max-flash 46080 --max-ram 8192
+	$(PYTHON) $(TOP)/docs/references/attesters/attest_flash_ram.py --elf $(BUILD)/firmware.elf --map $(BUILD)/firmware.elf.map --max-flash 55296 --max-ram 11264
 	$(PYTHON) $(TOP)/docs/references/attesters/attest_lwp3_checksum.py --bin $(BUILD)/firmware.bin --checksum-size 108544
+	$(PYTHON) $(TOP)/docs/references/attesters/attest_pwm_synth.py --source $(TOP)/firmware/src/vernie_synth.c
 
 # --- Layer 3: Host-compiled C unit tests with ASan + UBSan ---
-HOST_TEST_FLAGS := -std=c11 -Wall -Wextra -Werror -Wshadow -g -O1 -fsanitize=address,undefined -Isrc
+HOST_TEST_FLAGS := -std=c11 -DVERNIE_HOST_TEST -Wall -Wextra -Werror -Wshadow -g -O1 -fsanitize=address,undefined -Isrc
 
 test:
 	@mkdir -p $(BUILD)/host_tests
@@ -251,6 +256,28 @@ test:
 		tests/test_string_minimal.c \
 		-o $(BUILD)/host_tests/test_string_minimal
 	$(BUILD)/host_tests/test_string_minimal
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_synth.c \
+		tests/test_vernie_synth.c \
+		-o $(BUILD)/host_tests/test_vernie_synth
+	$(BUILD)/host_tests/test_vernie_synth
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_imu.c \
+		tests/test_vernie_imu.c \
+		-o $(BUILD)/host_tests/test_vernie_imu
+	$(BUILD)/host_tests/test_vernie_imu
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_storage.c \
+		tests/test_vernie_storage.c \
+		-o $(BUILD)/host_tests/test_vernie_storage
+	$(BUILD)/host_tests/test_vernie_storage
+	$(HOST_CC) $(HOST_TEST_FLAGS) \
+		src/vernie_protocol.c \
+		src/vernie_synth.c \
+		src/vernie_hw.c \
+		tests/test_vernie_hw.c \
+		-o $(BUILD)/host_tests/test_vernie_hw
+	$(BUILD)/host_tests/test_vernie_hw
 
 -include $(ALL_DEP)
 

@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "docs" / "references" / "attesters"))
 
 import attest_flash_ram  # noqa: E402
 import attest_lwp3_checksum  # noqa: E402
+import attest_pwm_synth  # noqa: E402
 import pack_firmware  # noqa: E402
 
 
@@ -79,10 +80,11 @@ def test_flash_ram_attester_catches_c1_recursive_memset_and_strlen() -> None:
     assert "<strlen>" in joined
 
 
-def test_flash_ram_attester_catches_budget_symbol_and_forbidden_violations() -> None:
+def test_flash_ram_attester_catches_budget_symbol_exidx_and_forbidden_violations() -> None:
     sections, symbols, map_text, disasm = _good_elf_inputs()
     sections[".text"] = 50000
     sections[".bss"] = 5500
+    sections[".ARM.exidx"] = 8
     symbols["pbdrv_reset_stm32_bootloader_selector"] = 0x20000200
     symbols["pbsys_telemetry_init"] = 0x08006000
     map_text += "pbdrv_block_device_init ramdisk mp_obj_new_int\n"
@@ -92,6 +94,7 @@ def test_flash_ram_attester_catches_budget_symbol_and_forbidden_violations() -> 
     joined = "\n".join(res["errors"])
     assert "Flash" in joined
     assert "RAM" in joined
+    assert ".ARM.exidx" in joined
     assert "pbdrv_reset_stm32_bootloader_selector" in joined
     assert "pbsys_telemetry_" in joined
     assert "pbdrv_block_device_" in joined
@@ -103,8 +106,18 @@ def test_flash_ram_attester_passes_real_built_elf_if_present() -> None:
     elf = REPO_ROOT / "firmware" / "build" / "firmware.elf"
     elf_map = REPO_ROOT / "firmware" / "build" / "firmware.elf.map"
     if elf.exists() and elf_map.exists():
-        res = attest_flash_ram.attest_elf(elf, elf_map, 46080, 8192)
+        res = attest_flash_ram.attest_elf(elf, elf_map, 55296, 11264)
         assert res["verdict"] == "PASS", f"ELF attestation failed: {res['errors']}"
+
+
+def test_pwm_synth_attester_passes_real_source() -> None:
+    src = REPO_ROOT / "firmware" / "src" / "vernie_synth.c"
+    res = attest_pwm_synth.attest_pwm_synth(src)
+    assert res["verdict"] == "PASS", f"PWM synth attestation failed: {res['errors']}"
+    assert res["cases_checked"] == 196
+    assert float(res["worst_pitch_error_pct"]) < 0.5
+    assert float(res["max_duty_pct"]) <= 15.0
+    assert float(res["min_deadband_pct"]) >= 70.0
 
 
 def test_lwp3_attester_receipt_and_error_json(tmp_path: Path) -> None:

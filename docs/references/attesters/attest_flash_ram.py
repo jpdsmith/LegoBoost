@@ -131,6 +131,10 @@ def evaluate_elf_attestation(
     for req_sec in (".text", ".name"):
         if sections.get(req_sec, 0) <= 0:
             errors.append(f"Required ELF section {req_sec} missing or empty")
+    if sections.get(".ARM.exidx", 0) > 0:
+        errors.append(
+            f"Unexpected .ARM.exidx section ({sections['.ARM.exidx']} B) — avoid 64-bit libgcc divisions"
+        )
 
     if flash_bytes > flash_limit:
         errors.append(f"Flash {flash_bytes} B exceeds limit {flash_limit} B")
@@ -143,6 +147,10 @@ def evaluate_elf_attestation(
         flash_lma_span = (symbols["_checksum"] + 4) - symbols["_fw_isr_vector_src"]
         if flash_lma_span <= 0 or flash_lma_span > flash_limit:
             errors.append(f"Flash LMA span {flash_lma_span} B out of bounds (limit {flash_limit} B)")
+        elif flash_lma_span != flash_bytes:
+            errors.append(
+                f"Flash LMA span ({flash_lma_span} B) != accounted Flash sections ({flash_bytes} B)"
+            )
 
     expected_addrs = {
         "_fw_isr_vector_src": 0x08005000,

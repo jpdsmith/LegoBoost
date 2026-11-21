@@ -56,7 +56,7 @@ jobs:
             --base-bin firmware/build/firmware-base.bin \
             --map-file firmware/build/firmware.elf.map \
             --elf-file firmware/build/firmware.elf \
-            --version vernie-os-0.1.0 \
+            --version vernie-os-0.2.0 \
             --hub-name VernieOS \
             --out-zip webapp/public/firmware/firmware.zip \
             --out-bin webapp/public/firmware/firmware.bin \

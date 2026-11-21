@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
-import React from "react";
+import React, { useState } from "react";
 import {
+  ChestLedState,
   DartSubcmd,
+  HEAD_HOME_SENTINEL,
   MODE_NAMES,
   TelemetryFlag,
   TelemetryFrame,
@@ -17,7 +19,11 @@ interface TelemetryHudProps {
   error: string | null;
   onConnect: () => void;
   onDisconnect: () => void;
+  onDrive: (left: number, right: number, timeoutMs?: number) => void;
+  onHead: (angleDeg: number, speed?: number) => void;
+  onSynth: (voice: number, presetOrNote: number, durMs?: number) => void;
   onSetHubLed: (r: number, g: number, b: number) => void;
+  onSetChestLed: (state: number) => void;
   onSetMode: (modeId: number) => void;
   onDartSubcmd: (subcmd: number) => void;
 }
@@ -30,6 +36,39 @@ const LED_PRESETS: Array<{ name: string; r: number; g: number; b: number; hex: s
   { name: "Ultraviolet", r: 170, g: 40, b: 255, hex: "#aa28ff" },
 ];
 
+const CHEST_LED_BUTTONS: Array<{ label: string; state: number }> = [
+  { label: "Off (Sense)", state: ChestLedState.OFF },
+  { label: "Blue", state: ChestLedState.BLUE },
+  { label: "Green", state: ChestLedState.GREEN },
+  { label: "Red", state: ChestLedState.RED },
+];
+
+const SFX_PRESETS: Array<{ label: string; id: number }> = [
+  { label: "Boot Chime", id: 1 },
+  { label: "Happy Chirp", id: 2 },
+  { label: "Curious Beep", id: 3 },
+  { label: "Alarm Squawk", id: 4 },
+  { label: "Warning Siren", id: 5 },
+  { label: "Laser Zap", id: 6 },
+  { label: "Victory", id: 7 },
+];
+
+const MIDI_NOTES: Array<{ label: string; midi: number }> = [
+  { label: "C5", midi: 72 },
+  { label: "E5", midi: 76 },
+  { label: "G5", midi: 79 },
+  { label: "C6", midi: 84 },
+];
+
+const LEGO_COLOR_NAMES: Record<number, string> = {
+  0: "Black / None",
+  3: "Blue",
+  5: "Green",
+  7: "Yellow",
+  9: "Red",
+  10: "White",
+};
+
 export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   bleSupported,
   connectionState,
@@ -39,28 +78,46 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   error,
   onConnect,
   onDisconnect,
+  onDrive,
+  onHead,
+  onSynth,
   onSetHubLed,
+  onSetChestLed,
   onSetMode,
   onDartSubcmd,
 }) => {
+  const [headSlider, setHeadSlider] = useState(0);
+  const [synthVoice, setSynthVoice] = useState(0);
+
   const safeMode = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SAFE_MODE));
   const dartArmed = Boolean(telemetry && (telemetry.flags & TelemetryFlag.DART_ARMED));
+  const headHomed = Boolean(telemetry && (telemetry.flags & TelemetryFlag.HEAD_HOMED));
+  const sensorOk = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SENSOR_OK));
+  const pickedUp = Boolean(telemetry && (telemetry.flags & TelemetryFlag.PICKED_UP));
+  const bump = Boolean(telemetry && (telemetry.flags & TelemetryFlag.BUMP));
   const btnOrTap = Boolean(telemetry && (telemetry.flags & TelemetryFlag.TAP));
+  const synthActive = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SYNTH_ACTIVE));
+
   const battVolts = telemetry ? (telemetry.batteryMv / 1000).toFixed(2) : "--";
-  // 6x AAA spans ~6.0 V cutoff to ~9.0 V fresh alkaline (NiMH ~7.2-7.8 V nominal).
   const battPct = telemetry
     ? Math.max(0, Math.min(100, Math.round(((telemetry.batteryMv - 6000) / (9000 - 6000)) * 100)))
     : 0;
-  // Require first telemetry packet to confirm !safeMode before enabling motion/arm buttons.
+
+  // Require first telemetry packet to confirm !safeMode before enabling motion/arm/synth buttons.
   const motionControlsDisabled = connectionState !== "connected" || !telemetry || safeMode;
+  const distText =
+    telemetry && telemetry.distancePct <= 100 ? `${telemetry.distancePct}%` : "N/A";
+  const colorText = telemetry
+    ? LEGO_COLOR_NAMES[telemetry.colorId] ?? `ID ${telemetry.colorId}`
+    : "--";
 
   return (
     <section className="card">
       <div className="card-header">
         <div>
-          <h2>Live Vernie OS Telemetry &amp; Phase 1 Diagnostics</h2>
+          <h2>Live Vernie OS Telemetry &amp; Phase 2 Hardware Diagnostics</h2>
           <p className="subtitle">
-            Pybricks GATT (<code>0xC5F50001</code>) · 18-byte AppData stream · 10 Hz target.
+            Pybricks GATT (<code>0xC5F50001</code>) · 18-byte AppData stream · 10 Hz live sensors.
           </p>
         </div>
         <div className="action-row">
@@ -83,8 +140,8 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
       {safeMode && (
         <div className="alert alert-warn">
           <strong>Watchdog Safe Mode Active:</strong> Hub rebooted from an IWDG watchdog timeout.
-          Motion commands are locked out for safety. Use Step 1 in the flasher to re-flash or
-          power-cycle.
+          Motion &amp; synth commands are locked out for safety. Use Step 1 in the flasher to
+          re-flash or power-cycle.
         </div>
       )}
 
@@ -118,26 +175,238 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         </div>
 
         <div className="metric">
-          <span className="label">Green Button / Tap</span>
-          <div className={`pill ${btnOrTap ? "pill-active" : ""}`}>
-            {btnOrTap ? "PRESSED" : "IDLE"}
+          <span className="label">LIS3DH Torso IMU</span>
+          <div className="metric-val">
+            {telemetry ? `${telemetry.pitchDeg}° / ${telemetry.rollDeg}°` : "-- / --"}
           </div>
-          <span className="meta">Press hub button to verify live input</span>
+          <div className="flag-row">
+            <span className={`pill ${pickedUp ? "pill-danger" : ""}`}>
+              {pickedUp ? "PICKED UP" : "UPRIGHT"}
+            </span>
+            <span className={`pill ${bump ? "pill-active" : ""}`}>
+              {bump ? "BUMP" : "CLEAR"}
+            </span>
+            <span className={`pill ${btnOrTap ? "pill-active" : ""}`}>
+              {btnOrTap ? "TAP/BTN" : "IDLE"}
+            </span>
+          </div>
         </div>
 
         <div className="metric">
-          <span className="label">Dart Safety Lock</span>
-          <div className={`pill ${dartArmed ? "pill-danger" : ""}`}>
-            {dartArmed ? "ARMED" : "DISARMED"}
+          <span className="label">88007 Chest Sensor</span>
+          <div className="metric-val">{distText}</div>
+          <span className="meta">
+            {sensorOk ? `Color: ${colorText}` : "Sensor absent or in Chest LED mode"}
+          </span>
+        </div>
+
+        <div className="metric">
+          <span className="label">Encoders &amp; Head</span>
+          <div className="metric-val">
+            {telemetry ? `${telemetry.headDeg}°` : "--"}
           </div>
-          <span className="meta">Always disarmed on boot &amp; disconnect</span>
+          <span className="meta">
+            {telemetry
+              ? `A:${telemetry.encA}° B:${telemetry.encB}° · ${headHomed ? "HOMED" : "UNHOMED"}`
+              : "Waiting for hub…"}
+          </span>
+        </div>
+
+        <div className="metric">
+          <span className="label">Dart Lock &amp; Synth</span>
+          <div className="flag-row">
+            <span className={`pill ${dartArmed ? "pill-danger" : ""}`}>
+              {dartArmed ? "ARMED" : "DISARMED"}
+            </span>
+            <span className={`pill ${synthActive ? "pill-active" : ""}`}>
+              {synthActive ? "SYNTH ON" : "SILENT"}
+            </span>
+          </div>
+          <span className="meta">Disarmed on boot, disconnect &amp; after fire</span>
         </div>
       </div>
 
       <div className="diag-section">
-        <h3>Phase 1 Command Smoke Tests</h3>
+        <h3>Phase 2 Hardware Smoke Tests</h3>
+
         <div className="diag-row">
-          <span className="label">Hub RGB LED (0x05):</span>
+          <span className="label">Track Drive Pulse (0x01, 400 ms dead-man):</span>
+          <div className="swatch-row">
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => onDrive(45, 45, 400)}
+            >
+              Forward
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => onDrive(-45, -45, 400)}
+            >
+              Reverse
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => onDrive(-40, 40, 400)}
+            >
+              Spin Left
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => onDrive(40, -40, 400)}
+            >
+              Spin Right
+            </button>
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={connectionState !== "connected"}
+              onClick={() => onDrive(0, 0, 200)}
+            >
+              STOP
+            </button>
+          </div>
+        </div>
+
+        <div className="diag-row">
+          <span className="label">Head Homing &amp; Angle (0x02, safe -40°..+35°):</span>
+          <div className="swatch-row">
+            <button
+              className="btn btn-sm btn-secondary"
+              disabled={motionControlsDisabled}
+              onClick={() => onHead(HEAD_HOME_SENTINEL, 30)}
+              title="Non-trigger single-direction stall homing (remove dart first!)"
+            >
+              Home Head (Non-Trigger)
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => {
+                setHeadSlider(-35);
+                onHead(-35, 50);
+              }}
+            >
+              -35°
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => {
+                setHeadSlider(0);
+                onHead(0, 50);
+              }}
+            >
+              0°
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => {
+                setHeadSlider(35);
+                onHead(35, 50);
+              }}
+            >
+              +35°
+            </button>
+            <input
+              aria-label="Head target angle"
+              className="angle-slider"
+              type="range"
+              min={-40}
+              max={35}
+              value={headSlider}
+              disabled={motionControlsDisabled}
+              onChange={(e) => {
+                const deg = Number(e.target.value);
+                setHeadSlider(deg);
+                onHead(deg, 50);
+              }}
+            />
+            <span className="meta">{headSlider}°</span>
+          </div>
+        </div>
+
+        <div className="diag-row">
+          <span className="label">Dart Launcher 2-Step Safety (0x03):</span>
+          <div className="swatch-row">
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={motionControlsDisabled}
+              onClick={() => onDartSubcmd(DartSubcmd.ARM)}
+            >
+              Arm Lock (0xA5)
+            </button>
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={motionControlsDisabled || !dartArmed || !headHomed}
+              onClick={() => onDartSubcmd(DartSubcmd.FIRE)}
+              title="Requires Armed + Head Homed"
+            >
+              Fire Dart
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              disabled={connectionState !== "connected"}
+              onClick={() => onDartSubcmd(DartSubcmd.DISARM)}
+            >
+              Disarm Lock
+            </button>
+          </div>
+        </div>
+
+        <div className="diag-row">
+          <span className="label">2-Voice Bipolar Singing-Motor Synth (0x04):</span>
+          <div className="swatch-row">
+            {[
+              { v: 0, label: "Auto" },
+              { v: 1, label: "V1 Tracks (TIM1)" },
+              { v: 2, label: "V2 Head (TIM3)" },
+            ].map((opt) => (
+              <button
+                key={opt.v}
+                className={`btn btn-sm ${synthVoice === opt.v ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setSynthVoice(opt.v)}
+              >
+                {opt.label}
+              </button>
+            ))}
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={connectionState !== "connected"}
+              onClick={() => onSynth(0, 0, 0)}
+            >
+              Stop Synth
+            </button>
+          </div>
+          <div className="swatch-row">
+            {SFX_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                className="btn btn-sm btn-ghost"
+                disabled={motionControlsDisabled}
+                onClick={() => onSynth(synthVoice, p.id, 0)}
+              >
+                {p.label}
+              </button>
+            ))}
+            {MIDI_NOTES.map((n) => (
+              <button
+                key={n.midi}
+                className="btn btn-sm btn-ghost"
+                disabled={motionControlsDisabled}
+                onClick={() => onSynth(synthVoice === 0 ? 1 : synthVoice, n.midi, 280)}
+              >
+                ♪ {n.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="diag-row">
+          <span className="label">Hub RGB LED &amp; 88007 Chest LED (0x05):</span>
           <div className="swatch-row">
             {LED_PRESETS.map((p) => (
               <button
@@ -149,6 +418,18 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               >
                 <span className="swatch-dot" style={{ background: p.hex }} />
                 {p.name}
+              </button>
+            ))}
+          </div>
+          <div className="swatch-row">
+            {CHEST_LED_BUTTONS.map((c) => (
+              <button
+                key={c.label}
+                className="btn btn-sm btn-ghost"
+                disabled={connectionState !== "connected"}
+                onClick={() => onSetChestLed(c.state)}
+              >
+                Chest: {c.label}
               </button>
             ))}
           </div>
@@ -167,26 +448,6 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
                 {m}: {MODE_NAMES[m]}
               </button>
             ))}
-          </div>
-        </div>
-
-        <div className="diag-row">
-          <span className="label">Dart Interlock Test (0x03):</span>
-          <div className="swatch-row">
-            <button
-              className="btn btn-sm btn-ghost"
-              disabled={motionControlsDisabled}
-              onClick={() => onDartSubcmd(DartSubcmd.ARM)}
-            >
-              Arm Lock (0xA5)
-            </button>
-            <button
-              className="btn btn-sm btn-ghost"
-              disabled={connectionState !== "connected"}
-              onClick={() => onDartSubcmd(DartSubcmd.DISARM)}
-            >
-              Disarm Lock
-            </button>
           </div>
         </div>
       </div>

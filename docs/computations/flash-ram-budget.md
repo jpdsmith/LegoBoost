@@ -31,7 +31,7 @@ sources:
 
 # Overview
 
-Mechanically verifies every compiled `firmware/build/firmware.elf` against the STM32F070RB hardware limits (`104 KB` Flash, `16 KB` SRAM)[^vernie-linker-ld] and the Vernie OS Phase 1 budget (`<= 45 KB` Flash, `<= 8 KB` RAM) while guaranteeing zero symbols from proprietary `telemetry.c`, `block_device_flash_stm32.c`, or MicroPython.[^vernie-arch]
+Mechanically verifies every compiled `firmware/build/firmware.elf` against the STM32F070RB hardware limits (`104 KB` Flash, `16 KB` SRAM)[^vernie-linker-ld] and the Vernie OS Phase 2 budget (`<= 54 KB` Flash, `<= 11 KB` RAM; zero `.ARM.exidx` sections; `flash_bytes == flash_lma_span`) while guaranteeing zero symbols from proprietary `telemetry.c`, `block_device_flash_stm32.c`, or MicroPython and zero GCC self-recursion in `string_minimal.c`.[^vernie-arch]
 
 [^vernie-linker-ld]: Vernie OS Move Hub GNU linker script (`firmware/linker/vernie_movehub.ld`)
 [^vernie-arch]: Vernie OS Architecture pure-MIT & memory configuration invariants
