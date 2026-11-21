@@ -18,6 +18,8 @@ concurrency:
 jobs:
   build-and-verify:
     runs-on: ubuntu-latest
+    outputs:
+      pages_enabled: ${{ steps.check-pages.outputs.enabled }}
     steps:
       - name: Checkout repository with direct submodules
         uses: actions/checkout@v4
@@ -71,7 +73,7 @@ jobs:
           npm --prefix webapp test
           npm --prefix webapp run build
 
-      - name: Upload firmware artifacts
+      - name: Upload firmware & cockpit artifacts
         uses: actions/upload-artifact@v4
         with:
           name: vernie-os-movehub-firmware
@@ -81,18 +83,31 @@ jobs:
             firmware/build/firmware.elf
             webapp/public/firmware/manifest.json
 
+      - name: Check if GitHub Pages is enabled for this repository
+        id: check-pages
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub Pages is not enabled for this repository yet (make repo public or enable Pages -> Source: GitHub Actions to auto-deploy)."
+          fi
+
       - name: Setup GitHub Pages
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: steps.check-pages.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload GitHub Pages bundle
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: steps.check-pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: webapp/dist
 
   deploy-pages:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.build-and-verify.outputs.pages_enabled == 'true'
     needs: build-and-verify
     runs-on: ubuntu-latest
     concurrency:
