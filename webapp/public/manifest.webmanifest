@@ -1,0 +1,17 @@
+{
+  "name": "Vernie OS Cockpit & Flasher",
+  "short_name": "Vernie OS",
+  "description": "Chromebook-first Web Bluetooth flasher, tank drive cockpit, 2-voice motor synth, and FLASH_USER_1 macro composer for LEGO BOOST Vernie.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0d1219",
+  "theme_color": "#0d1219",
+  "icons": [
+    {
+      "src": "./vernie-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

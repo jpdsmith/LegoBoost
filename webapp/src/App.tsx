@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: MIT
+// Vernie OS Phase 4 Tactile Robotics Cockpit & Chromebook Web Bluetooth Flasher PWA.
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { TelemetryFrame } from "./ble/protocol";
+import { TelemetryFlag, TelemetryFrame } from "./ble/protocol";
 import { ConnectionState, VernieClient } from "./ble/vernieClient";
+import { DrivePad } from "./components/DrivePad";
 import { FirmwareUpdater } from "./components/FirmwareUpdater";
+import { HeadAndDart } from "./components/HeadAndDart";
+import { ModeAndMacros } from "./components/ModeAndMacros";
+import { MotorSynthPad } from "./components/MotorSynthPad";
 import { TelemetryHud } from "./components/TelemetryHud";
+
+type CockpitTab = "cockpit" | "synth" | "macros" | "flasher";
 
 export const App: React.FC = () => {
   const bleSupported = typeof navigator !== "undefined" && Boolean(navigator.bluetooth);
+  const [activeTab, setActiveTab] = useState<CockpitTab>("cockpit");
   const [connState, setConnState] = useState<ConnectionState>("disconnected");
   const [deviceName, setDeviceName] = useState("VernieOS");
   const [telemetry, setTelemetry] = useState<TelemetryFrame | null>(null);
@@ -88,17 +97,32 @@ export const App: React.FC = () => {
     }
   };
 
+  const connected = connState === "connected";
+  const safeMode = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SAFE_MODE));
+  const dartArmed = Boolean(telemetry && (telemetry.flags & TelemetryFlag.DART_ARMED));
+  const headHomed = Boolean(telemetry && (telemetry.flags & TelemetryFlag.HEAD_HOMED));
+  const pickedUp = Boolean(telemetry && (telemetry.flags & TelemetryFlag.PICKED_UP));
+  const synthActive = Boolean(telemetry && (telemetry.flags & TelemetryFlag.SYNTH_ACTIVE));
+  const motionDisabled = !connected || !telemetry || safeMode;
+
+  const tabs: Array<{ id: CockpitTab; label: string }> = [
+    { id: "cockpit", label: "Drive & Head" },
+    { id: "synth", label: "Motor Synth & LEDs" },
+    { id: "macros", label: "Modes & Macros" },
+    { id: "flasher", label: "Flasher & Recovery" },
+  ];
+
   return (
     <div className="shell">
       <header className="topbar">
         <div>
           <h1>Vernie OS Cockpit</h1>
           <p className="subtitle">
-            Custom native-C LEGO® BOOST Move Hub firmware · Phase 3 Autonomous Brain &amp; Flash Macro Engine
+            Pure-MIT native-C LEGO® BOOST Move Hub firmware · Chromebook Web Bluetooth Controller &amp; Flasher
           </p>
         </div>
         <span className={`status-dot status-${connState}`}>
-          {connState === "connected"
+          {connected
             ? `Connected · ${deviceName}`
             : connState === "connecting"
               ? "Pairing…"
@@ -115,34 +139,89 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      <main className="grid">
-        <FirmwareUpdater
-          bleSupported={bleSupported}
-          connectionState={connState}
-          onRebootToBootloader={() => client.rebootToBootloader()}
-        />
+      <TelemetryHud
+        bleSupported={bleSupported}
+        connectionState={connState}
+        deviceName={deviceName}
+        telemetry={telemetry}
+        rxHz={rxHz}
+        error={bleError}
+        onConnect={() => void runBle(() => client.connect())}
+        onDisconnect={() => client.disconnect()}
+        onEmergencyStop={() => client.sendDrive(0, 0, 200)}
+      />
 
-        <TelemetryHud
-          bleSupported={bleSupported}
-          connectionState={connState}
-          deviceName={deviceName}
-          telemetry={telemetry}
-          rxHz={rxHz}
-          error={bleError}
-          onConnect={() => void runBle(() => client.connect())}
-          onDisconnect={() => client.disconnect()}
-          onDrive={(l, r, t) => client.sendDrive(l, r, t)}
-          onHead={(deg, spd, coalesce) => void runBle(() => client.sendHead(deg, spd, { coalesce }))}
-          onSynth={(v, n, d) => void runBle(() => client.sendSynth(v, n, d))}
-          onSetHubLed={(r, g, b) => void runBle(() => client.sendHubLed(r, g, b))}
-          onSetChestLed={(s) => void runBle(() => client.sendChestLed(s))}
-          onSetMode={(m) => void runBle(() => client.sendSetMode(m))}
-          onDartSubcmd={(s) => void runBle(() => client.sendDart(s))}
-          onUploadMacro={(steps, opts) => runBleThrowing(() => client.uploadMacro(steps, opts))}
-          onPlayMacro={() => runBleThrowing(() => client.playMacro())}
-          onStopMacro={() => runBleThrowing(() => client.stopMacro())}
-          onClearMacro={() => runBleThrowing(() => client.clearMacro(true))}
-        />
+      <nav className="tab-bar" role="tablist" aria-label="Vernie OS Cockpit views">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            id={`tab-${tab.id}`}
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            className={`tab-btn ${activeTab === tab.id ? "tab-btn-active" : ""}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="workspace">
+        {activeTab === "cockpit" && (
+          <div className="grid">
+            <DrivePad
+              connected={connected}
+              disabled={motionDisabled}
+              onDrive={(l, r, t) => client.sendDrive(l, r, t)}
+            />
+            <HeadAndDart
+              connected={connected}
+              disabled={motionDisabled}
+              headHomed={headHomed}
+              headDeg={telemetry?.headDeg ?? 0}
+              dartArmed={dartArmed}
+              pickedUp={pickedUp}
+              onHead={(deg, spd, coalesce) =>
+                void runBle(() => client.sendHead(deg, spd, { coalesce }))
+              }
+              onDartSubcmd={(s) => void runBle(() => client.sendDart(s))}
+            />
+          </div>
+        )}
+
+        {activeTab === "synth" && (
+          <MotorSynthPad
+            connected={connected}
+            disabled={motionDisabled}
+            synthActive={synthActive}
+            onSynth={(v, n, d) => void runBle(() => client.sendSynth(v, n, d))}
+            onSetHubLed={(r, g, b) => void runBle(() => client.sendHubLed(r, g, b))}
+            onSetChestLed={(s) => void runBle(() => client.sendChestLed(s))}
+          />
+        )}
+
+        {activeTab === "macros" && (
+          <ModeAndMacros
+            connected={connected}
+            disabled={motionDisabled}
+            activeModeId={telemetry ? telemetry.modeId : null}
+            onSetMode={(m) => void runBle(() => client.sendSetMode(m))}
+            onUploadMacro={(steps, opts) =>
+              runBleThrowing(() => client.uploadMacro(steps, opts))
+            }
+            onPlayMacro={() => runBleThrowing(() => client.playMacro())}
+            onStopMacro={() => runBleThrowing(() => client.stopMacro())}
+            onClearMacro={() => runBleThrowing(() => client.clearMacro(true))}
+          />
+        )}
+
+        {activeTab === "flasher" && (
+          <FirmwareUpdater
+            bleSupported={bleSupported}
+            connectionState={connState}
+            onRebootToBootloader={() => client.rebootToBootloader()}
+          />
+        )}
       </main>
     </div>
   );
