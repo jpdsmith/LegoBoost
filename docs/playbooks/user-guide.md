@@ -1,17 +1,21 @@
 ---
 type: Playbook
 title: Vernie OS User Guide
-description: Plain-English owner's guide for installing Vernie OS on a LEGO BOOST Move Hub, driving, calibrating the head and dart launcher, playing motor music, building saved routines, using camera and voice controls, troubleshooting, and returning to the official LEGO app.
-tags: [playbook, user-guide, getting-started, chromebook, android, vernie]
+description: Plain-English owner's guide for installing Vernie OS on a LEGO BOOST Move Hub, using Vernie Pilot and Classic Cockpit, pairing an Android phone on your tank with a Chromebook, Mac, or Meta Quest VR headset over Wi-Fi, driving with Xbox or Quest Touch controllers, using Smart Co-Pilot and Auto Explorer, playing motor music, building saved routines, troubleshooting, and returning to the official LEGO app.
+tags: [playbook, user-guide, getting-started, chromebook, android, quest-vr, fpv, xbox, vernie]
 status: stable
-generated: { by: antigravity/1.0, at: 2026-11-21T21:30:00Z }
+generated: { by: antigravity/1.0, at: 2026-11-22T13:05:00Z }
 verified:
-  - { by: process:ci-build, at: 2026-11-21T21:30:00Z }
-stale_after: 2027-05-21T00:00:00Z
+  - { by: process:ci-build, at: 2026-11-22T12:18:00Z }
+stale_after: 2027-05-22T00:00:00Z
 sources:
   - id: vernie-cockpit-app
     resource: ../../webapp/src/App.tsx
-    title: Vernie OS Web Bluetooth Cockpit App
+    title: Vernie OS Classic Web Bluetooth Cockpit App
+    author: human:jpdsmith
+  - id: vernie-pilot-app
+    resource: ../../webapp-pilot/src/App.tsx
+    title: Vernie Pilot Tactile & FPV/VR PWA
     author: human:jpdsmith
   - id: vernie-firmware-main
     resource: ../../firmware/src/main.c
@@ -25,7 +29,12 @@ sources:
 
 # Welcome to Vernie OS
 
-**Vernie OS** gives your **LEGO® BOOST Move Hub** a brand-new brain and a browser-based remote control.[^vernie-cockpit-app] Once installed, your robot can roam and react completely on its own (no tablet or phone needed), or connect wirelessly to a Chromebook, Android phone, or computer browser for live driving, music, custom routines, and camera/voice tricks.
+**Vernie OS** gives your **LEGO® BOOST Move Hub** a brand-new brain and two browser-based remote controls — no app store download needed:
+
+- **Vernie Pilot (Recommended):** **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)** — modern tactile console with live **Tank/Rover** & **Vernie** interactive diagram, **Android Phone ↔ Chromebook / Mac / Meta Quest VR** Wi-Fi camera driving, **Xbox controller** & **Quest Touch hand controller** support, **Smart Co-Pilot** obstacle avoidance, and smooth **Auto Explorer** room mapping.[^vernie-pilot-app]
+- **Classic Engineering Cockpit:** **[https://jpdsmith.github.io/LegoBoost/](https://jpdsmith.github.io/LegoBoost/)** — compact technical dashboard with raw diagnostics and single-device webcam Vision & Voice tools.[^vernie-cockpit-app]
+
+Once Vernie OS is installed on your Move Hub, your robot can also roam and react completely on its own with no phone or computer connected.
 
 > **Safe to Try:** The Move Hub's built-in factory update system is permanent and cannot be erased. You can switch back to the official LEGO® BOOST app at any time in less than a minute.
 
@@ -33,11 +42,15 @@ sources:
 
 # 1. What You Need
 
-- **A LEGO® BOOST Move Hub** — works in the official **Vernie** robot *or* any custom car/rover build.
+- **A LEGO® BOOST Move Hub** — works in the official **Vernie** robot *or* any custom **tank/car/rover** build.
   - Have the extra head motor or the color & distance sensor? Plug them into **Port C** and **Port D** in **either order** — Vernie automatically detects which port has which part.
 - **6 fresh AAA batteries** — fresh batteries matter most while installing updates (weak batteries can cause Bluetooth to drop partway through).
-- **Google Chrome or Microsoft Edge** on a **Chromebook**, **Android phone/tablet**, **Windows PC**, **Mac**, or **Linux** computer. *(Note: iPhone and iPad Safari do not support browser Bluetooth yet.)*
-- **The Web Remote:** Open **[https://jpdsmith.github.io/LegoBoost/](https://jpdsmith.github.io/LegoBoost/)** — nothing to download or install. *(Tip: In Chrome, you can tap the **Install App** button in the address bar to add **Vernie OS** right to your home screen or shelf.)*
+- **For Bluetooth control & flashing:** **Google Chrome** or **Microsoft Edge** on a **Chromebook**, **Android phone/tablet**, **Windows PC**, **Mac**, or **Linux** computer. *(iPhone and iPad Safari do not support browser Bluetooth yet.)*
+- **Optional for Remote FPV / VR Driving:**
+  - A **spare Android phone** mounted facing forward on your tank (connects to the Move Hub over Bluetooth and streams its rear camera over your home Wi-Fi).
+  - A **Chromebook / Mac / PC** *(optionally with an **Xbox controller**)* **or** a **Meta Quest 1 / 2 / 3** headset (using **Meta Quest Browser**) on the **same Wi-Fi** to view the live camera and drive remotely — no Bluetooth needed on the Driver device!
+
+*(Tip: In Chrome, click the **Install App** icon in the address bar to pin **Vernie Pilot** to your Chromebook shelf or phone home screen.)*
 
 ---
 
@@ -45,7 +58,7 @@ sources:
 
 ## First-Time Install (From Stock LEGO Software)
 
-1. Open **[https://jpdsmith.github.io/LegoBoost/](https://jpdsmith.github.io/LegoBoost/)** and open the **Flasher & Recovery** tab.
+1. Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)** and click the **Setup** tab *(or **Flasher & Recovery** in Classic Cockpit)*.
 2. Make sure your Move Hub is **turned off**.
 3. **Press and hold the green button** on the hub for about **5–10 seconds** until the light flashes **Red → Green → Blue**, then let go. *(This is Update Mode.)*
 4. Click **Flash Firmware** in the browser, choose **`LEGO Bootloader`** in the Bluetooth popup, and wait about 20 seconds while the bar fills to 100%.
@@ -53,8 +66,8 @@ sources:
 
 ## Updating to a Newer Version Later
 
-1. Click **Connect to VernieOS** at the top of the page.
-2. Open the **Flasher & Recovery** tab and click **Step 1: Send Software Reboot**.
+1. Click **Connect Robot** at the top of the page.
+2. Open **Setup** *(or **Flasher & Recovery**)* and click **Step 1: Send Software Reboot**.
 3. Wait 2 seconds for the light to flash **Red → Green → Blue**, then click **Step 2: Flash Firmware** and pick **`LEGO Bootloader`**.
 
 *(Need detailed recovery help? See the [Flashing & Recovery Playbook](flashing-and-recovery.md).)*
@@ -70,7 +83,7 @@ The LEGO Move Hub has **no physical speaker**. Vernie OS makes sounds by gently 
 - **4-note rising chime:** Everything started up normally!
 - **Quick single chirp:** You switched to the next mode.
 - **Two-tone squawk:** Vernie thinks he's been picked up or tipped over in an autonomous mode (set him back down to stop it).
-- **Silent + rapid Red/Blue flashing:** Safety Mode activated after a glitch or weak-battery reset (see [Common Questions](#7-common-questions--quick-fixes)).
+- **Silent + rapid Red/Blue flashing:** Safety Mode activated after a glitch or weak-battery reset (see [Common Questions](#8-common-questions--quick-fixes)).
 
 ## Green Button & Tap Controls
 
@@ -96,122 +109,122 @@ The LEGO Move Hub has **no physical speaker**. Vernie OS makes sounds by gently 
 
 ## Works Standing Up *or* Lying Flat
 
-Whether you built **Vernie standing upright** or a **flat 4-wheel car**, just set your robot down in its normal driving position **before** tapping the green button. After sitting still for a fraction of a second, it automatically learns which side is "up" for that session — so tilt and pickup detection work accurately either way.
+Whether you built **Vernie standing upright** or a **flat 4-wheel tank/car**, just set your robot down in its normal driving position **before** tapping the green button. After sitting still for a fraction of a second, it automatically learns which side is "up" for that session — so tilt and pickup detection work accurately either way.
 
-Manual driving in the **Drive & Head** tab always works in **any** position, even if your robot is on a ramp or in your hands.
-
----
-
-# 4. Using the Web Remote (All 5 Tabs)
-
-Tap **Connect to VernieOS** at the top of the screen and choose **`VernieOS`** in the Bluetooth popup.
-
-The **Live Telemetry** bar stays at the top of every tab so you can always see battery level, current mode, tilt status, sensor readings, and the red **STOP** button (which halts all movement and routines right away).
+Manual driving always works in **any** position, even if your robot is on a ramp or in your hands.
 
 ---
 
-## Tab 1 — Drive & Head
+# 4. Vernie Pilot Basics (All 5 Stations)
 
-### Driving (Tank Drive Pad)
-- **Touch or mouse:** Drag the round joystick in any direction. Letting go stops immediately.
-- **Buttons:** Tap **Forward**, **Reverse**, **Spin Left**, **Spin Right**, or **STOP**.
-- **Keyboard:** Use **W / A / S / D** or the **Arrow keys**, and press **Spacebar** anytime for an instant emergency stop.
-- **Game controller:** Plug in or pair a standard USB/Bluetooth gamepad and move the left stick.
-- **Speed Limit slider (`25%–100%`):** Lower this for smoother, gentler driving indoors.
+Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)**. The top bar keeps **Connect Robot**, live Bluetooth or Wi-Fi status, and the red **STOP** button always within reach.
 
-### Moving the Head & Eyebrows *(and What "Home Head" Means)*
+## Station 1 — Drive
 
-Whenever you turn the hub off, Vernie's external head motor **forgets which direction his head is facing**. On Vernie, turning the head too far to one side pulls the trigger on his shoulder dart shooter — so if Vernie guessed his starting position wrong, a normal head turn could accidentally launch a dart!
+- **Tank / Vernie Switch:** Pick **Tank / Rover** (hides Vernie-only head/dart controls and shows the rover digital twin) or **Vernie** (full head, eyebrow, and dart launcher controls).
+- **Driving:** Drag the round tactile joystick, use **W / A / S / D** or **Arrow keys**, plug in an **Xbox / USB / Bluetooth gamepad**, and press **Spacebar** anytime for an instant emergency stop. Choose a speed preset (`40%`, `65%`, `85%`, `100%`) for smooth indoor control.
+- **Moving the Head & Eyebrows (Vernie build):** Whenever you turn the hub off, the head motor forgets where center is. To prevent accidentally pulling the shoulder dart trigger, remove any loaded dart and tap **Home Head** once until the badge turns green (**`HEAD HOMED`**). That unlocks the **5 eyebrow poses** and the **Head angle slider**.
+- **Dart Launcher 3-Condition Safety Lock:** Requires **`HEAD HOMED`** + robot sitting **`UPRIGHT`** + lifting the safety cover (**`ARMED`**) before **Fire Dart** unlocks. Automatically disarms right after firing, if picked up, or if Bluetooth disconnects.
 
-To keep that from ever happening, head positioning uses a simple one-time calibration step each time you power on:
+## Station 2 — FPV Rover (Remote Camera, Co-Pilot, Auto Explorer & Quest VR)
 
-1. **Take out any loaded dart first.**
-2. Tap **Home Head (Non-Trigger)**. Vernie slowly turns his head *away* from the dart trigger until he gently feels the stopper, then moves back to straight ahead (`0°`).
-3. Watch the badge at the top right of the card change from **`UNHOMED`** to **`HEAD HOMED`** — this simply means **"head position calibrated and centered!"**
-4. Now all **5 eyebrow pose buttons** (`Far Left` through `Far Right`) and the **Head angle slider** unlock so you can turn his head and wiggle his eyebrows safely.
+See **[Section 5](#5-remote-fpv-driving-smart-co-pilot--meta-quest-vr)** below for full setup, Xbox & Quest Touch mappings, and Wi-Fi video details! Also includes the **Voice Commander** sub-tab (speak or type phrases like `"hello vernie"`, `"forward"`, `"turn left"`, `"dance"`, `"explorer mode"`, or **`"stop"`** — voice can never fire the dart).
 
-### Shooting the Dart (2-Step Safety Lock)
+## Station 3 — Music & Lights
 
-Vernie's dart launcher **always starts locked (Disarmed)** when turned on so it can never fire unexpectedly.
+- **Motor Synth:** Pick **Auto**, **V1 Tracks**, or **V2 Head**, choose note length (`150 / 280 / 500 ms`), trigger any of the **7 R2-D2 sound effects**, or play melodies on the **13-key chromatic piano** (`C5–C6`). *(Continuous sound automatically takes a quick breather after 3 seconds to keep the motor coils cool.)*
+- **Hub RGB & Chest Sensor LED:** Pick any Move Hub LED color, or light up the chest sensor **Blue / Green / Red**. *(Remember to click **Chest: Off (Sense)** when you want distance and color brick sensing back!)*
 
-1. Make sure the head is calibrated (**`HEAD HOMED`**) and Vernie is sitting upright (**`UPRIGHT`**).
-2. Tap **Arm Lock (0xA5)** to unlock the safety (the pill turns red: **`ARMED`**).
-3. Aim safely and tap **Fire Dart**.
-4. Right after firing — or if you pick Vernie up or disconnect Bluetooth — the safety lock automatically switches back to **`DISARMED`**. You can also tap **Disarm Lock** anytime.
+## Station 4 — Routines (Saved Flash Macros)
 
----
+Build custom playlists of **DRIVE**, **HEAD**, **SYNTH**, **LED**, and **WAIT** steps (up to 46 steps / `232 B`; dart firing is excluded for safety). Start from presets (**Victory Dance**, **Desk Patrol**, **R2-D2 Greeting**) or an empty sequence, click **Upload & Play** to test live, or **Save to Flash (Yellow Card)** so you can replay it offline anytime by holding a **Yellow LEGO brick** in front of the sensor in **Color Cards** mode.
 
-## Tab 2 — Motor Synth & LEDs
+## Station 5 — Setup (Wireless Updates & Recovery)
 
-### Playing Music & Sound Effects
-- **Pick which motor sings:** Leave it on **Auto (Free Voice)**, or choose **V1 Tracks** (wheels) or **V2 Head** (external head motor).
-- **Pick note length:** Choose short (`150 ms`), medium (`280 ms`), or long (`500 ms`) notes.
-- **Soundboard:** Tap any of the **7 R2-D2 style sound effects** (*Boot Chime*, *Happy Chirp*, *Curious Beep*, *Alarm Squawk*, *Warning Siren*, *Laser Zap*, *Victory*).
-- **Piano:** Play melodies on the **13-key keyboard** (`C5` to `C6`).
-- **Stop Synth:** Silences audio immediately. *(To keep the motors cool, continuous sound automatically pauses after 3 seconds for a quick breather.)*
-
-### Changing Lights
-- **Move Hub RGB LED:** Tap a color preset or click **Custom** to pick any color you like.
-- **Chest Sensor Light:** Light up the color/distance sensor **Blue**, **Green**, or **Red**.
-  - **Important tip:** The sensor can't glow a solid color and measure distance/bricks at the same time. Tap **Chest: Off (Sense)** whenever you want distance and color readings back!
+One-click wireless firmware updates, custom `.bin` verification, and step-by-step instructions to return to the official LEGO BOOST app.
 
 ---
 
-## Tab 3 — Modes & Macros
+# 5. Remote FPV Driving, Smart Co-Pilot & Meta Quest VR
 
-### Switching Personalities
-Click any of the 5 mode cards to change what Vernie is doing right away.
+Turn a **spare Android phone** mounted on your tank into a live wireless camera + Bluetooth bridge, and drive from another room on your **Chromebook**, **Mac**, **PC**, or **Meta Quest VR headset**!
 
-### Building Saved Routines (Macros)
-A **macro** is a custom playlist of actions you create and store right inside the robot's memory:
+## Two-Device Wi-Fi Pairing (Zero IP Address Needed!)
 
-1. Start with a ready-made routine (**Victory Dance**, **Desk Patrol**, or **R2-D2 Greeting**), or click **Empty Sequence** to start from scratch.
-2. Add steps using the dropdown:
-   - **DRIVE:** Set Left and Right wheel speeds (`-100` to `+100`) and how long to drive.
-   - **HEAD:** Set a head angle and turn speed *(remember to calibrate the head with **Home Head** first so it moves!)*.
-   - **SYNTH:** Play a sound effect (`1–7`) or musical note.
-   - **LED:** Change the hub light color.
-   - **WAIT:** Pause for a moment.
-3. Reorder steps with **`↑` / `↓`**, remove any step with **`×`** (up to 46 steps total — and for safety, routines can never fire the dart launcher).
-4. Click **Upload & Play** to test it live, or click **Save to Flash (Yellow Card)** to save it permanently inside the hub. Once saved, you can turn off your browser and trigger your routine anytime offline by holding a **Yellow LEGO brick** in front of the sensor in **Color Cards** mode!
+Both devices just need to be on the **same Wi-Fi network** (no IP addresses to look up):
+
+1. **On the Android Phone (mounted on the tank):**
+   - Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)**, open **FPV Rover**, and select **Android Phone on Tank**.
+   - Tap **Connect Robot** in the top bar to pair Bluetooth with **`VernieOS`** *(you can also test video streaming first without Bluetooth connected!)*.
+   - Tap **Start Camera & Broadcast on Wi-Fi** and allow rear-camera access. Your phone keeps its screen awake and starts advertising on your home Wi-Fi.
+2. **On your Chromebook, Mac, PC, or Meta Quest Browser:**
+   - Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)** and open **FPV Rover** (**Driver / Quest VR**).
+   - Within ~1 second, a green **Found your Tank on your Wi-Fi!** card pops up automatically — click **Connect Now**!
+   - *(Backup options: type the 4-letter **Room Code** shown on the phone, paste the phone's **Copy Join Link**, or expand **Offline Copy/Paste Pair** for 100% internet-free local pairing.)*
+
+### How Live Video Connects (Automatic 3-Stage Resilience)
+- **Wi-Fi FPV Live (Direct P2P):** Connects directly between your phone and driver over local Wi-Fi (~24 fps, ultra-low latency).
+- **COMPAT VIDEO (Automatic Codec Fallback):** If an older Android phone's hardware video encoder outputs a blank WebRTC video track while the data link is open, Vernie Pilot automatically streams crisp JPEG frames over the direct P2P data channel after 3 seconds.
+- **Wi-Fi Relay Live / `RELAY VIDEO` (Automatic Firewall Fallback):** If your Wi-Fi router blocks peer-to-peer loopback or macOS blocks Chrome's local-network UDP, Vernie Pilot automatically switches after 8 seconds (or immediately if you click **Use Relay Video Now**) to live relayed camera video + full drive controls. You can click **Retry Direct P2P** anytime.
+- **Safety Failsafe:** In both Direct P2P and Relay modes, if the Wi-Fi signal drops for more than **500 ms**, the Android phone immediately halts the tank motors.
+
+## Smart Co-Pilot & Smooth Auto Explorer
+
+Switch **Pilot Mode** right below the live video (or press **Xbox Y** / **Quest Left Y**):
+
+- **Manual FPV:** Direct raw control from your Xbox controller, keyboard, touch stick, or Quest hand controllers.
+- **Smart Co-Pilot:** Smooth driving assistance running live on the phone's camera + chest sensor:
+  - **Collision Guard (`Off` / `Auto-Brake` / `Smart Dodge`):** **Auto-Brake** halts before hitting walls; **Smart Dodge** smoothly steers around obstacles toward the clearest open lane without stopping unnecessarily *(reverse is always allowed so you can back out anytime)*.
+  - **Straight Heading Hold:** Uses the phone gyroscope and wheel encoders to prevent tank tread drift.
+  - **Tape Lane Assist:** Gently centers the tank along floor tape lines.
+  - **Tap-to-Follow & AI Vision:** Tap any bright object directly on the live camera video to lock on and follow hands-free, or toggle **AI Vision (80 Objects)** to detect people, pets, chairs, cups, and more right on the phone.
+- **Auto Explorer:** Drives smoothly and continuously around your room using curved-arc steering (no stop-start jerking), builds a live **2D Occupancy Room Map**, automatically backs out of tight corners if stuck, and snaps photos into the **Rover Discovery Log** on the fly without stopping. Pick from 4 missions: **Explore Room**, **Find Person**, **Find Objects**, or **Return Home**. Moving your stick or pressing **STOP** immediately returns control to you.
+
+## Xbox Controller Mapping (Chromebook / Mac / PC)
+
+Plug in or Bluetooth-pair an Xbox controller (or any standard gamepad) on the Driver device:
+
+| Control | Action |
+| :--- | :--- |
+| **Left Stick** | Smooth arcade drive (push forward/back + steer left/right) |
+| **RT / LT Triggers + Left Stick X** | Car-style gas (`RT`) & reverse (`LT`) pedals + steering |
+| **Right Stick (Left / Right)** | Pan optional Port C head/turret motor |
+| **A** | Honk Vernie's horn |
+| **B** | **Emergency STOP** (halts motors & exits Auto Explorer immediately) |
+| **X** | Toggle Android phone flashlight **Headlights** |
+| **Y** | Cycle Pilot Mode (**Manual FPV → Smart Co-Pilot → Auto Explorer**) |
+| **LB / RB** | Step Speed Limit down / up (`40% → 65% → 85% → 100%`) |
+| **Menu / Start** | Lock onto / unlock detected target for hands-free follow |
+
+## Meta Quest 1 / 2 / 3 Immersive VR Cockpit
+
+Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)** inside **Meta Quest Browser** (tested for Quest 1 v1 headsets as well as Quest 2/3):
+
+1. Pair with your Android phone over Wi-Fi using the green **Connect Now** card (just like on a Chromebook).
+2. Tap the orange **Enter VR Cockpit (Quest)** button.
+3. Inside VR, you sit in a comfortable grounded cockpit with an **88° curved panoramic live camera windshield** (works with both Direct P2P and Relay video), floating **3D AR floor clearance lanes & steering arcs**, and an angled **lower dashboard** displaying the live 2D Room Map, motor tread gauges, battery, and front distance.
+
+### Oculus Touch Hand Controller Mapping
+
+| Controller & Input | Action |
+| :--- | :--- |
+| **Left Thumbstick** *(Arcade Mode)* | Arcade drive (forward/back + steer) |
+| **Right / Left Index Trigger + Left Stick X** *(Arcade Mode)* | Car-style gas (`R-Trigger`) & reverse (`L-Trigger`) + steering |
+| **Left & Right Thumbsticks Y** *(Twin-Stick Tank Mode)* | Independent Left tread & Right tread control |
+| **Left Thumbstick Click** | Toggle **Arcade/Trigger** ↔ **Twin-Stick Tank** drive style |
+| **Right Thumbstick Click** | **Recenter** the VR cockpit in front of your current view |
+| **Right Thumbstick X** *(Arcade Mode)* | Pan optional Port C head/turret motor |
+| **Right B** | **Emergency STOP** (+ strong haptic pulse) |
+| **Right A** | Horn |
+| **Left X** | Toggle phone **Headlights** |
+| **Left Y** | Cycle Pilot Mode (**Manual → Smart Co-Pilot → Auto Explorer**) |
+| **Left / Right Grip Squeeze** | Speed Limit down / up (`40% / 65% / 85% / 100%`) |
+
+*(Collision Guard braking and dodging also send subtle haptic pulses to both Touch controllers!)*
 
 ---
 
-## Tab 4 — Vision & Voice
-
-Turn your Chromebook webcam — or an Android phone strapped to your robot's back — into eyes and ears for Vernie! Everything runs **locally right inside your browser** (no cloud account needed).
-
-### Camera Tracking (Vision Backpack)
-1. Click **Start Camera** and choose **Front (Chromebook)** or **Rear (Phone Backpack)**.
-2. Choose what the camera looks for (**Detector**):
-   - **Motion & Wave:** Tracks movement and hand waves.
-   - **Red / Green / Blue / Yellow Brick:** Tracks bright colored LEGO bricks or balls.
-3. Choose how your robot reacts (**Behavior**):
-   - **Head Follow:** Smoothly turns Vernie's head to follow the target left and right. *(Before turning this on, go to Tab 1 and click **Home Head** once so Vernie knows where center is — otherwise Head Follow pauses safely until he's calibrated.)*
-   - **Body Follow:** Turns and gently drives toward the target, automatically stopping if his chest sensor spots a wall/hand nearby or if you pick him up.
-   - **Wave React:** Wave your hand in front of the camera to make Vernie chirp happily, flash green, and say hello!
-4. Check **Stream BLE commands to Vernie** when you're ready for the robot to move. Switching away from this tab or clicking **Stop Camera** automatically turns off the camera and stops the wheels.
-5. *Want to try tracking without a camera?* Use **Target Left**, **Target Right**, and **Simulate Wave** to test how Vernie responds.
-
-### Voice Commands
-- Tap **Start Microphone** to talk to Vernie, **or** type a phrase into the command box, **or** tap one of the **Quick Voice Prompts**.
-- Check **Speak replies** if you want your browser to answer back out loud while Vernie chirps and moves.
-- **Things you can say:**
-  - *Movement:* `"forward"`, `"reverse"`, `"turn left"`, `"turn right"`, **`"stop"`** *(always stops immediately!)*
-  - *Head:* `"home head"` *(calibrates center)*, `"look left"`, `"look right"`, `"look center"`
-  - *Fun:* `"hello vernie"`, `"dance"`, `"laser"`, `"siren"`, `"play macro"`
-  - *Switch modes:* `"pet mode"`, `"explorer mode"`, `"sentry mode"`, `"color mode"`, `"remote mode"`
-- **Safety rule:** Voice commands can **never** shoot the dart — saying `"fire"` or `"shoot"` is always blocked so background noise can't trigger a launch.
-
----
-
-## Tab 5 — Flasher & Recovery
-
-Use this tab to install wireless updates whenever a new version of Vernie OS is published, test custom firmware files, or follow the 1-minute steps to restore official LEGO software.
-
----
-
-# 5. Playing Without a Phone or Computer
+# 6. Playing Without a Phone or Computer
 
 Just tap the green button to turn Vernie on, then use a quick button press (or double-tap the robot while still) to cycle through the 4 standalone personalities:
 
@@ -222,13 +235,13 @@ Just tap the green button to turn Vernie on, then use a quick button press (or d
   - **Green brick:** Drive forward and cheer!
   - **Red brick:** Spin around and squawk!
   - **Blue brick:** Dance and play a victory tune!
-  - **Yellow brick:** Replay whatever custom routine you saved in **Modes & Macros**!
+  - **Yellow brick:** Replay whatever custom routine you saved in **Routines** / **Modes & Macros**!
 
 *(For exact timing and technical thresholds, see [Autonomous Modes & Flash Macro Guide](autonomous-modes.md).)*
 
 ---
 
-# 6. Switching Back to the Official LEGO® BOOST App
+# 7. Switching Back to the Official LEGO® BOOST App
 
 You can return your Move Hub to 100% factory LEGO software anytime:
 
@@ -239,23 +252,32 @@ You can return your Move Hub to 100% factory LEGO software anytime:
 
 ---
 
-# 7. Common Questions & Quick Fixes
+# 8. Common Questions & Quick Fixes
 
+- **Why does FPV say `Wi-Fi Relay Live` (`RELAY VIDEO`) instead of `Wi-Fi FPV Live`?**
+  Your router or computer blocked direct local-network UDP (very common on **macOS Sequoia Chrome / Incognito** or guest Wi-Fi), so Vernie Pilot automatically switched to Relay Video so you still get a live stream immediately. To unlock full 24 fps direct local video on macOS, allow **System Settings → Privacy & Security → Local Network → Google Chrome** (and try a regular window instead of Incognito), then click **Retry Direct P2P**.
+- **Can I test Wi-Fi camera streaming before connecting Vernie over Bluetooth?**
+  Yes! Just tap **Start Camera & Broadcast on Wi-Fi** on the Android phone and click **Connect Now** on your Chromebook/Mac/Quest. Video, floor clearance overlays, and Auto-Discovery all work immediately; you can connect Bluetooth to **`VernieOS`** anytime before or after.
+- **Why didn't I get a new app update right away?**
+  Because Vernie Pilot installs offline as a PWA, **hard-refresh the page once** on both devices after a new release so the browser activates the newest cached version.
+- **Why isn't the `Enter VR Cockpit (Quest)` button visible on my laptop?**
+  That button appears automatically when opened in a WebXR-capable headset browser such as **Meta Quest Browser** over HTTPS.
 - **Why are the Head buttons, Head slider, or `Fire Dart` greyed out?**
-  Vernie needs to know where center is before moving his head. Remove any dart and click **Home Head (Non-Trigger)** in Tab 1 until the badge says **`HEAD HOMED`**. To enable **Fire Dart**, you must also click **Arm Lock (0xA5)** and make sure Vernie is sitting upright.
+  Vernie needs to know where center is before moving his head. Remove any dart and click **Home Head** until the badge says **`HEAD HOMED`**. To enable **Fire Dart**, Vernie must also be sitting upright and have the safety cover lifted (**`ARMED`**).
 - **Why does Chest Distance say `N/A`?**
-  Either the chest sensor isn't plugged in, or you turned on a solid Chest LED color (**Blue / Green / Red**). Go to **Motor Synth & LEDs** and click **Chest: Off (Sense)** to turn sensing back on.
+  Either the chest sensor isn't plugged in, or you turned on a solid Chest LED color (**Blue / Green / Red**). Go to **Music & Lights** *(or **Motor Synth & LEDs**)* and click **Chest: Off (Sense)** to turn sensing back on.
 - **Why did it squawk and flash red right when I turned it on?**
-  It thinks it's tilted or being held in your hands while in an autonomous mode. Turn it off, set it down flat or upright in its normal resting pose, and tap the green button again — it will automatically learn its resting position in a fraction of a second. *(Remember: manual driving on the Tank Drive Pad works in any position!)*
+  It thinks it's tilted or being held in your hands while in an autonomous mode. Turn it off, set it down flat or upright in its normal resting pose, and tap the green button again — it automatically learns its resting position in a fraction of a second. *(Manual driving always works in any position!)*
 - **Why won't `VernieOS` show up in the Bluetooth list?**
-  Check that the hub is turned on (light softly pulsing Blue/Green/Red/Yellow) and not already connected to another browser tab, phone, or the LEGO app.
+  Check that the hub is turned on (light softly pulsing Blue/Green/Red/Yellow) and not already connected to another browser tab, phone, or the official LEGO app.
 - **Why did flashing fail or disconnect partway through?**
   Low batteries are the #1 cause — swap in **6 fresh AAA batteries**, keep the hub close to your computer, and don't touch the green button while the bar is moving.
 - **Why is the light flashing Red and Blue back and forth?**
-  That's **Safety Mode** — the hub restarted after an unexpected hiccup or low-battery dip and locked the motors to stay safe. Check your batteries and restart the hub (or use **Flasher & Recovery → Send Software Reboot**).
+  That's **Safety Mode** — the hub restarted after an unexpected hiccup or low-battery dip and locked the motors to stay safe. Check your batteries and restart the hub (or use **Setup → Send Software Reboot**).
 - **Can I connect extra hardware like an ESP32 camera or MP3 speaker?**
   Yes! Advanced builders can see [Optional Port C & D Raw UART Hardware Expansion](../hardware/uart-expansion.md) for wiring and power safety details.
 
-[^vernie-cockpit-app]: `webapp/src/App.tsx` — Vernie OS 5-tab Web Bluetooth Cockpit application
+[^vernie-cockpit-app]: `webapp/src/App.tsx` — Vernie OS Classic 5-tab Web Bluetooth Cockpit application
+[^vernie-pilot-app]: `webapp-pilot/src/App.tsx` — Vernie Pilot tactile PWA with Wi-Fi FPV, Xbox, Smart Co-Pilot, Auto Explorer, and Meta Quest WebXR VR Cockpit
 [^vernie-firmware-main]: `firmware/src/main.c` — Vernie OS firmware runtime loop
 [^pybricks-code]: Pybricks Code browser utility supporting official LEGO BOOST firmware restoration
