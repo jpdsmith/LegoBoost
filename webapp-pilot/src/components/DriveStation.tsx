@@ -9,11 +9,19 @@ import {
   TelemetryFlag,
   TelemetryFrame,
 } from "@core/ble/protocol";
+import {
+  mixXboxToTank,
+  XboxControllerReader,
+  XboxDriveSample,
+} from "../input/xboxController";
 import { mixArcadeToTank } from "../utils/driveMath";
-import { IconShield, IconSpark, IconStop } from "./Icons";
-import { VernieTwin } from "./VernieTwin";
+import { IconCamera, IconShield, IconSpark, IconStop } from "./Icons";
+import { ChassisProfile, VernieTwin } from "./VernieTwin";
+import { XboxHudStrip } from "./XboxHudStrip";
 
 export interface DriveStationProps {
+  chassis?: ChassisProfile;
+  headlightsOn?: boolean;
   connected: boolean;
   demoMode: boolean;
   disabled: boolean;
@@ -27,6 +35,8 @@ export interface DriveStationProps {
   onDartSubcmd: (subcmd: number) => void;
   onSetMode: (modeId: number) => void;
   onSynth: (voice: number, presetOrNote: number, durMs?: number) => void;
+  onChangeChassis?: (next: ChassisProfile) => void;
+  onOpenFpv?: () => void;
   onLaunchDemo?: () => void;
   onDemoTogglePickup?: () => void;
   onDemoBump?: () => void;
@@ -60,7 +70,21 @@ const EXPRESSION_POSES: Array<{
   { label: "Far Right", deg: 35, lTilt: 8, rTilt: -18 },
 ];
 
+const EMPTY_XBOX: XboxDriveSample = {
+  connected: false,
+  name: null,
+  steer: 0,
+  throttle: 0,
+  turretX: 0,
+  usingTriggers: false,
+  rt: 0,
+  lt: 0,
+  actions: [],
+};
+
 export const DriveStation: React.FC<DriveStationProps> = ({
+  chassis = "vernie",
+  headlightsOn = false,
   connected,
   demoMode,
   disabled,
@@ -74,6 +98,8 @@ export const DriveStation: React.FC<DriveStationProps> = ({
   onDartSubcmd,
   onSetMode,
   onSynth,
+  onChangeChassis,
+  onOpenFpv,
   onLaunchDemo,
   onDemoTogglePickup,
   onDemoBump,
@@ -86,7 +112,7 @@ export const DriveStation: React.FC<DriveStationProps> = ({
   const [dualR, setDualR] = useState(0);
   const [output, setOutput] = useState<{ left: number; right: number }>({ left: 0, right: 0 });
   const [keyboardEnabled, setKeyboardEnabled] = useState(true);
-  const [gamepadName, setGamepadName] = useState<string | null>(null);
+  const [xboxSample, setXboxSample] = useState<XboxDriveSample>(EMPTY_XBOX);
   const [sliderDeg, setSliderDeg] = useState(0);
 
   const padRef = useRef<HTMLDivElement | null>(null);
@@ -96,15 +122,18 @@ export const DriveStation: React.FC<DriveStationProps> = ({
   const dualActiveRef = useRef<{ l: boolean; r: boolean }>({ l: false, r: false });
   const keysRef = useRef<Set<string>>(new Set());
   const wasMovingRef = useRef(false);
+  const xboxRef = useRef(new XboxControllerReader());
 
   const speedCapRef = useRef(speedCap);
   const driveModeRef = useRef(driveMode);
   const connectedRef = useRef(connected);
   const onDriveRef = useRef(onDrive);
+  const onSynthRef = useRef(onSynth);
   speedCapRef.current = speedCap;
   driveModeRef.current = driveMode;
   connectedRef.current = connected;
   onDriveRef.current = onDrive;
+  onSynthRef.current = onSynth;
 
   const flags = telemetry?.flags ?? 0;
   const headHomed = Boolean(flags & TelemetryFlag.HEAD_HOMED);
@@ -231,7 +260,7 @@ export const DriveStation: React.FC<DriveStationProps> = ({
     };
   }, [connected, disabled, keyboardEnabled, stopNow]);
 
-  // 16 Hz coalesced drive loop (joystick, dual faders, keyboard, gamepad)
+  // 16 Hz coalesced drive loop (joystick, dual faders, keyboard, Xbox Gamepad)
   useEffect(() => {
     if (!connected || disabled) {
       if (wasMovingRef.current) stopNow();
@@ -239,6 +268,25 @@ export const DriveStation: React.FC<DriveStationProps> = ({
     }
 
     const id = window.setInterval(() => {
+      const xSample = xboxRef.current.poll();
+      setXboxSample((prev) =>
+        prev.connected === xSample.connected &&
+        prev.usingTriggers === xSample.usingTriggers &&
+        prev.name === xSample.name
+          ? prev
+          : xSample
+      );
+
+      for (const act of xSample.actions) {
+        if (act === "stop") {
+          stopNow();
+          return;
+        }
+        if (act === "horn") onSynthRef.current(0, 2, 0);
+        if (act === "speed-down") setSpeedCap((c) => Math.max(25, c - 20));
+        if (act === "speed-up") setSpeedCap((c) => Math.min(100, c + 20));
+      }
+
       let mixed: { left: number; right: number };
 
       if (driveModeRef.current === "dual" && (dualActiveRef.current.l || dualActiveRef.current.r)) {
@@ -247,36 +295,21 @@ export const DriveStation: React.FC<DriveStationProps> = ({
           left: Math.round(dualRef.current.l * cap),
           right: Math.round(dualRef.current.r * cap),
         };
-      } else {
-        let x = activeVecRef.current.x;
-        let y = activeVecRef.current.y;
-
-        if (!draggingRef.current && keysRef.current.size > 0) {
-          const k = keysRef.current;
-          y =
-            (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) -
-            (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
-          x =
-            (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) -
-            (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
-          setStick({ x, y });
-        } else if (!draggingRef.current && typeof navigator.getGamepads === "function") {
-          const pads = navigator.getGamepads();
-          const pad = pads
-            ? Array.from(pads).find((p): p is Gamepad => Boolean(p && p.connected))
-            : undefined;
-          if (pad) {
-            setGamepadName(pad.id.slice(0, 28));
-            const gx = pad.axes[0] ?? 0;
-            const gy = -(pad.axes[1] ?? 0);
-            x = Math.abs(gx) >= 0.15 ? gx : 0;
-            y = Math.abs(gy) >= 0.15 ? gy : 0;
-            setStick({ x, y });
-          } else {
-            setGamepadName(null);
-          }
-        }
+      } else if (!draggingRef.current && keysRef.current.size > 0) {
+        const k = keysRef.current;
+        const y =
+          (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) -
+          (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
+        const x =
+          (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) -
+          (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
+        setStick({ x, y });
         mixed = mixArcadeToTank(x, y, speedCapRef.current);
+      } else if (!draggingRef.current && xSample.connected && (xSample.steer !== 0 || xSample.throttle !== 0)) {
+        setStick({ x: xSample.steer, y: xSample.throttle });
+        mixed = mixXboxToTank(xSample.steer, xSample.throttle, speedCapRef.current);
+      } else {
+        mixed = mixArcadeToTank(activeVecRef.current.x, activeVecRef.current.y, speedCapRef.current);
       }
 
       setOutput(mixed);
@@ -304,9 +337,11 @@ export const DriveStation: React.FC<DriveStationProps> = ({
 
   return (
     <div className="drive-grid">
-      {/* Left Hero Stage: Live Vernie Digital Twin + Quick Mode Switcher */}
+      {/* Left Hero Stage: Live Tank Rover / Vernie Digital Twin + Quick Mode Switcher */}
       <div className="drive-hero-col">
         <VernieTwin
+          chassis={chassis}
+          headlightsOn={headlightsOn}
           connected={connected}
           demoMode={demoMode}
           telemetry={telemetry}
@@ -569,170 +604,273 @@ export const DriveStation: React.FC<DriveStationProps> = ({
                 <span>WASD / Arrows</span>
               </label>
               <span className="helper-micro">
-                {gamepadName ? `Gamepad: ${gamepadName}` : "USB/BT Gamepad ready"}
+                {xboxSample.connected ? `Xbox: ${xboxSample.name}` : "Xbox / Gamepad ready"}
               </span>
             </div>
+            <XboxHudStrip sample={xboxSample} compact />
           </div>
         </section>
 
-        {/* HEAD, EYEBROWS & FLIP-COVER DART MODULE */}
-        <section className="console-panel" aria-label="Head expressions and dart launcher">
-          <div className="panel-head">
-            <div>
-              <h2>Head &amp; Expressions</h2>
-              <p className="panel-sub">
-                {headHomed
-                  ? `Calibrated & ready · Live angle ${headDeg}°`
-                  : "Calibrate once after power-on so Vernie knows where center is"}
-              </p>
-            </div>
-            <button
-              type="button"
-              id="btn-calibrate-head"
-              className={`keycap keycap-sm ${headHomed ? "keycap-subtle" : "keycap-orange"}`}
-              disabled={disabled}
-              onClick={() => {
-                setSliderDeg(0);
-                onHead(HEAD_HOME_SENTINEL, 30);
-              }}
-              title="Safely turns away from dart trigger to find center (remove dart first)"
-            >
-              {homingInProgress
-                ? "Calibrating…"
-                : headHomed
-                  ? "Recalibrate"
-                  : "Calibrate Head"}
-            </button>
-          </div>
-
-          {!headHomed && connected && (
-            <div className="inline-callout">
-              <IconShield size={15} />
-              <span>
-                Remove any loaded dart, then tap <strong>Calibrate Head</strong> to unlock eyebrow
-                poses and steering safely away from the trigger.
-              </span>
-            </div>
-          )}
-
-          {/* 5 Illustrated Eyebrow Pose Cards */}
-          <div className="pose-grid" role="group" aria-label="Eyebrow expression presets">
-            {EXPRESSION_POSES.map((pose) => (
-              <button
-                key={pose.deg}
-                type="button"
-                className={`pose-card ${headHomed && Math.abs(sliderDeg - pose.deg) <= 6 ? "is-selected" : ""}`}
-                disabled={angleLocked}
-                onClick={() => {
-                  setSliderDeg(pose.deg);
-                  onHead(pose.deg, 55);
-                }}
-              >
-                <svg className="pose-brow-icon" viewBox="0 0 44 20" aria-hidden="true">
-                  <rect
-                    x="4"
-                    y="7"
-                    width="14"
-                    height="4.5"
-                    rx="2.2"
-                    fill="#EA580C"
-                    transform={`rotate(${pose.lTilt} 11 9)`}
-                  />
-                  <rect
-                    x="26"
-                    y="7"
-                    width="14"
-                    height="4.5"
-                    rx="2.2"
-                    fill="#EA580C"
-                    transform={`rotate(${pose.rTilt} 33 9)`}
-                  />
-                </svg>
-                <span className="pose-name">{pose.label}</span>
-                <span className="pose-deg mono-num">{pose.deg > 0 ? `+${pose.deg}°` : `${pose.deg}°`}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="angle-slider-wrap">
-            <span className="mono-readout-muted">-40°</span>
-            <input
-              id="pilot-head-slider"
-              aria-label="Head target angle"
-              className="tactile-slider"
-              type="range"
-              min={-40}
-              max={35}
-              value={sliderDeg}
-              disabled={angleLocked}
-              onChange={(e) => {
-                const deg = Number(e.target.value);
-                setSliderDeg(deg);
-                onHead(deg, 55, true);
-              }}
-            />
-            <span className="mono-readout-muted">+35°</span>
-          </div>
-
-          {/* 2-Step Physical Flip-Cover Dart Launcher */}
-          <div className="dart-dock">
-            <div className="panel-head-inline">
-              <span className="engraved-label">Shoulder Dart Launcher</span>
-              <div className="safety-checks">
-                <span className={`check-dot ${headHomed ? "is-ok" : ""}`}>Head Calibrated</span>
-                <span className={`check-dot ${!pickedUp ? "is-ok" : ""}`}>Upright</span>
-                <span className={`check-dot ${dartArmed ? "is-armed" : ""}`}>
-                  {dartArmed ? "Armed" : "Locked"}
-                </span>
+        {/* CHASSIS-SPECIFIC MODULE: Tank / Rover Deck OR Vernie Head & Dart */}
+        {chassis === "rover" ? (
+          <section className="console-panel" aria-label="Tank rover chassis and camera controls">
+            <div className="panel-head">
+              <div>
+                <h2>Tank / Rover Deck</h2>
+                <p className="panel-sub">
+                  Flat Move Hub · Auto-orientation · Front 88007 radar
+                </p>
               </div>
-            </div>
-
-            <div className={`dart-switch-bay ${dartArmed ? "is-open" : ""}`}>
-              {!dartArmed ? (
-                <button
-                  type="button"
-                  id="btn-dart-arm"
-                  className="dart-safety-cover"
-                  disabled={disabled}
-                  onClick={() => onDartSubcmd(DartSubcmd.ARM)}
-                >
-                  <span className="hazard-stripe" aria-hidden="true" />
-                  <span className="cover-text">
-                    <IconShield size={15} />
-                    <span>Lift Safety Cover to Arm</span>
-                  </span>
-                </button>
-              ) : (
-                <div className="dart-armed-controls">
+              {onChangeChassis && (
+                <div className="segmented-mini" role="group" aria-label="Robot chassis type">
                   <button
                     type="button"
-                    id="btn-dart-fire"
-                    className="keycap keycap-fire"
-                    disabled={fireLocked}
-                    onClick={() => onDartSubcmd(DartSubcmd.FIRE)}
-                    title={
-                      fireLocked
-                        ? "Requires Calibrated Head & Upright posture"
-                        : "Launch shoulder dart now"
-                    }
+                    className="is-active"
+                    onClick={() => onChangeChassis("rover")}
                   >
-                    <IconSpark size={16} />
-                    <span>FIRE DART</span>
+                    Tank / Rover
                   </button>
-                  <button
-                    type="button"
-                    id="btn-dart-disarm"
-                    className="keycap keycap-subtle"
-                    disabled={!connected}
-                    onClick={() => onDartSubcmd(DartSubcmd.DISARM)}
-                  >
-                    Close Cover (Disarm)
+                  <button type="button" onClick={() => onChangeChassis("vernie")}>
+                    Vernie
                   </button>
                 </div>
               )}
             </div>
-          </div>
-        </section>
+
+            <div className="rover-callout-card">
+              <div>
+                <strong>Attach Spare Android Phone for Remote FPV Driving</strong>
+                <p className="panel-sub">
+                  Mount an Android phone low &amp; centered on the tank, pair it to your Chromebook
+                  over Wi-Fi, and drive with your Xbox controller, Smart Co-Pilot, or Auto Explorer.
+                </p>
+              </div>
+              {onOpenFpv && (
+                <button
+                  type="button"
+                  id="btn-jump-fpv"
+                  className="keycap keycap-orange"
+                  onClick={onOpenFpv}
+                >
+                  <IconCamera size={15} />
+                  <span>Open FPV Rover Cockpit</span>
+                </button>
+              )}
+            </div>
+
+            <div className="dart-dock">
+              <div className="panel-head-inline">
+                <span className="engraved-label">Optional Port C Camera Turret Pan</span>
+                <button
+                  type="button"
+                  className="keycap keycap-subtle keycap-sm"
+                  disabled={disabled}
+                  onClick={() => {
+                    setSliderDeg(0);
+                    onHead(HEAD_HOME_SENTINEL, 30);
+                  }}
+                >
+                  {headHomed ? `Centered (${headDeg}°)` : "Center Turret"}
+                </button>
+              </div>
+              <div className="angle-slider-wrap">
+                <span className="mono-readout-muted">-40°</span>
+                <input
+                  id="pilot-turret-slider"
+                  aria-label="Camera turret pan angle"
+                  className="tactile-slider"
+                  type="range"
+                  min={-40}
+                  max={35}
+                  value={sliderDeg}
+                  disabled={angleLocked}
+                  onChange={(e) => {
+                    const deg = Number(e.target.value);
+                    setSliderDeg(deg);
+                    onHead(deg, 55, true);
+                  }}
+                />
+                <span className="mono-readout-muted">+35°</span>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section className="console-panel" aria-label="Head expressions and dart launcher">
+            <div className="panel-head">
+              <div>
+                <h2>Head &amp; Expressions</h2>
+                <p className="panel-sub">
+                  {headHomed
+                    ? `Calibrated & ready · Live angle ${headDeg}°`
+                    : "Calibrate once after power-on so Vernie knows where center is"}
+                </p>
+              </div>
+              <div className="action-cluster">
+                {onChangeChassis && (
+                  <div className="segmented-mini" role="group" aria-label="Robot chassis type">
+                    <button type="button" onClick={() => onChangeChassis("rover")}>
+                      Tank / Rover
+                    </button>
+                    <button
+                      type="button"
+                      className="is-active"
+                      onClick={() => onChangeChassis("vernie")}
+                    >
+                      Vernie
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  id="btn-calibrate-head"
+                  className={`keycap keycap-sm ${headHomed ? "keycap-subtle" : "keycap-orange"}`}
+                  disabled={disabled}
+                  onClick={() => {
+                    setSliderDeg(0);
+                    onHead(HEAD_HOME_SENTINEL, 30);
+                  }}
+                  title="Safely turns away from dart trigger to find center (remove dart first)"
+                >
+                  {homingInProgress
+                    ? "Calibrating…"
+                    : headHomed
+                      ? "Recalibrate"
+                      : "Calibrate Head"}
+                </button>
+              </div>
+            </div>
+
+            {!headHomed && connected && (
+              <div className="inline-callout">
+                <IconShield size={15} />
+                <span>
+                  Remove any loaded dart, then tap <strong>Calibrate Head</strong> to unlock eyebrow
+                  poses and steering safely away from the trigger.
+                </span>
+              </div>
+            )}
+
+            {/* 5 Illustrated Eyebrow Pose Cards */}
+            <div className="pose-grid" role="group" aria-label="Eyebrow expression presets">
+              {EXPRESSION_POSES.map((pose) => (
+                <button
+                  key={pose.deg}
+                  type="button"
+                  className={`pose-card ${headHomed && Math.abs(sliderDeg - pose.deg) <= 6 ? "is-selected" : ""}`}
+                  disabled={angleLocked}
+                  onClick={() => {
+                    setSliderDeg(pose.deg);
+                    onHead(pose.deg, 55);
+                  }}
+                >
+                  <svg className="pose-brow-icon" viewBox="0 0 44 20" aria-hidden="true">
+                    <rect
+                      x="4"
+                      y="7"
+                      width="14"
+                      height="4.5"
+                      rx="2.2"
+                      fill="#EA580C"
+                      transform={`rotate(${pose.lTilt} 11 9)`}
+                    />
+                    <rect
+                      x="26"
+                      y="7"
+                      width="14"
+                      height="4.5"
+                      rx="2.2"
+                      fill="#EA580C"
+                      transform={`rotate(${pose.rTilt} 33 9)`}
+                    />
+                  </svg>
+                  <span className="pose-name">{pose.label}</span>
+                  <span className="pose-deg mono-num">
+                    {pose.deg > 0 ? `+${pose.deg}°` : `${pose.deg}°`}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div className="angle-slider-wrap">
+              <span className="mono-readout-muted">-40°</span>
+              <input
+                id="pilot-head-slider"
+                aria-label="Head target angle"
+                className="tactile-slider"
+                type="range"
+                min={-40}
+                max={35}
+                value={sliderDeg}
+                disabled={angleLocked}
+                onChange={(e) => {
+                  const deg = Number(e.target.value);
+                  setSliderDeg(deg);
+                  onHead(deg, 55, true);
+                }}
+              />
+              <span className="mono-readout-muted">+35°</span>
+            </div>
+
+            {/* 2-Step Physical Flip-Cover Dart Launcher */}
+            <div className="dart-dock">
+              <div className="panel-head-inline">
+                <span className="engraved-label">Shoulder Dart Launcher</span>
+                <div className="safety-checks">
+                  <span className={`check-dot ${headHomed ? "is-ok" : ""}`}>Head Calibrated</span>
+                  <span className={`check-dot ${!pickedUp ? "is-ok" : ""}`}>Upright</span>
+                  <span className={`check-dot ${dartArmed ? "is-armed" : ""}`}>
+                    {dartArmed ? "Armed" : "Locked"}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`dart-switch-bay ${dartArmed ? "is-open" : ""}`}>
+                {!dartArmed ? (
+                  <button
+                    type="button"
+                    id="btn-dart-arm"
+                    className="dart-safety-cover"
+                    disabled={disabled}
+                    onClick={() => onDartSubcmd(DartSubcmd.ARM)}
+                  >
+                    <span className="hazard-stripe" aria-hidden="true" />
+                    <span className="cover-text">
+                      <IconShield size={15} />
+                      <span>Lift Safety Cover to Arm</span>
+                    </span>
+                  </button>
+                ) : (
+                  <div className="dart-armed-controls">
+                    <button
+                      type="button"
+                      id="btn-dart-fire"
+                      className="keycap keycap-fire"
+                      disabled={fireLocked}
+                      onClick={() => onDartSubcmd(DartSubcmd.FIRE)}
+                      title={
+                        fireLocked
+                          ? "Requires Calibrated Head & Upright posture"
+                          : "Launch shoulder dart now"
+                      }
+                    >
+                      <IconSpark size={16} />
+                      <span>FIRE DART</span>
+                    </button>
+                    <button
+                      type="button"
+                      id="btn-dart-disarm"
+                      className="keycap keycap-subtle"
+                      disabled={!connected}
+                      onClick={() => onDartSubcmd(DartSubcmd.DISARM)}
+                    >
+                      Close Cover (Disarm)
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

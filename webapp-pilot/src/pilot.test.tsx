@@ -340,8 +340,8 @@ describe("App shell Demo Mode & 5-station navigation", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Routines/i }));
     expect(screen.getByText(/Routine Builder/i)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("tab", { name: /Eyes & Voice/i }));
-    expect(screen.getByText(/Robot Eyes \(Camera\)/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /FPV Rover/i }));
+    expect(screen.getByText(/Chromebook FPV Driver/i)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: /Setup/i }));
     expect(screen.getByText(/Wireless Firmware Setup/i)).toBeTruthy();

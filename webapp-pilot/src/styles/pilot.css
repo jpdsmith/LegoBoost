@@ -2601,3 +2601,613 @@ a:focus-visible {
     display: none;
   }
 }
+
+/* ===========================
+   PHASE 1 — XBOX HUD & FPV ROVER COCKPIT
+   =========================== */
+
+.xbox-hud {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-well);
+  border: 1px solid var(--border-hairline);
+  font-size: 0.77rem;
+  color: var(--ink-secondary);
+}
+
+.xbox-hud.is-connected {
+  background: var(--green-soft);
+  border-color: hsl(142, 54%, 72%);
+  color: var(--green-deep);
+}
+
+.xbox-hud.is-compact {
+  padding: 7px 10px;
+  font-size: 0.73rem;
+}
+
+.xbox-hud-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+}
+
+.xbox-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: hsl(218, 12%, 70%);
+}
+
+.xbox-status-dot.is-live {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(22, 163, 74, 0.7);
+}
+
+.xbox-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.xbox-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.xbox-key kbd {
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #334155;
+}
+
+.xbox-key kbd.xbtn-a { background: #16a34a; }
+.xbox-key kbd.xbtn-b { background: #dc2626; }
+.xbox-key kbd.xbtn-x { background: #2563eb; }
+.xbox-key kbd.xbtn-y { background: #d97706; }
+.xbox-key kbd.xbtn-neutral { background: #1f242d; }
+
+.rover-callout-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-well);
+  box-shadow: var(--shadow-well);
+}
+
+.fpv-role-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.fpv-link-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: var(--surface-deck);
+  border: 1px solid var(--border-hairline);
+  font-size: 0.79rem;
+  font-weight: 700;
+  color: var(--ink-secondary);
+}
+
+.fpv-cockpit-panel {
+  gap: 14px;
+}
+
+.fpv-pair-strip {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.fpv-pair-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fpv-code-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.code-input {
+  width: 112px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  text-align: center;
+  font-weight: 800;
+}
+
+.offline-pair-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-well);
+}
+
+/* Full-bleed 16:9 Cinema FPV Viewport */
+.fpv-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 290px;
+  max-height: 560px;
+  border-radius: var(--radius-md);
+  background: radial-gradient(circle at 50% 40%, #1c2432 0%, #0d1118 80%);
+  border: 2px solid #222936;
+  overflow: hidden;
+  box-shadow: inset 0 6px 22px rgba(0, 0, 0, 0.65);
+  user-select: none;
+}
+
+.fpv-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.fpv-media.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fpv-standby {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  color: var(--ink-visor);
+}
+
+.fpv-standby h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+}
+
+.fpv-standby p {
+  margin: 0;
+  max-width: 480px;
+  font-size: 0.85rem;
+  color: var(--ink-visor-muted);
+  line-height: 1.5;
+}
+
+.fpv-hud-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.fpv-top-hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 6;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+
+.fpv-hud-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fpv-hud-cluster .visor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  backdrop-filter: blur(8px);
+  background: rgba(15, 20, 29, 0.72);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.fpv-hud-cluster .visor-chip-cyan {
+  background: rgba(2, 132, 199, 0.72);
+  color: #ffffff;
+}
+
+.fpv-hud-cluster .visor-chip-amber {
+  background: rgba(217, 119, 6, 0.82);
+  color: #ffffff;
+}
+
+.fpv-hud-cluster .visor-chip-green {
+  background: rgba(22, 163, 74, 0.8);
+  color: #ffffff;
+}
+
+.fpv-hud-cluster .visor-chip-red {
+  background: rgba(220, 38, 38, 0.85);
+  color: #ffffff;
+}
+
+.fpv-floating-stick {
+  position: absolute;
+  left: 18px;
+  bottom: 62px;
+  z-index: 7;
+  width: 118px;
+  height: 118px;
+  border-radius: 999px;
+  background: rgba(15, 20, 29, 0.52);
+  backdrop-filter: blur(8px);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  cursor: grab;
+}
+
+.fpv-floating-puck {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--orange);
+  border: 2px solid #ffffff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.fpv-bottom-dock {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fpv-dock-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fpv-pill-btn {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(15, 20, 29, 0.76);
+  backdrop-filter: blur(8px);
+  color: #f1f5f9;
+  font-size: 0.77rem;
+  font-weight: 700;
+}
+
+.fpv-pill-btn:hover {
+  background: rgba(30, 41, 59, 0.88);
+}
+
+.fpv-pill-btn.is-lit {
+  background: var(--orange);
+  border-color: #fdba74;
+  color: #ffffff;
+}
+
+.fpv-speed-pills {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 9px;
+  background: rgba(15, 20, 29, 0.76);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.fpv-speed-btn {
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.fpv-speed-btn.is-active {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+/* Android Phone on Tank Host Room Code Hero */
+.room-code-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  background: var(--surface-visor);
+  color: var(--ink-visor);
+}
+
+.room-code-hero .engraved-label {
+  color: var(--ink-visor-muted);
+}
+
+.room-code-display {
+  font-size: 2.1rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: #38bdf8;
+  line-height: 1.15;
+  margin-top: 4px;
+}
+
+.host-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.host-check-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-hairline);
+}
+
+.host-check-item strong {
+  font-size: 0.84rem;
+}
+
+.host-check-item span {
+  font-size: 0.78rem;
+  color: var(--ink-secondary);
+}
+
+.host-check-item.is-ok {
+  background: var(--green-soft);
+  border-color: hsl(142, 54%, 74%);
+}
+
+.host-check-item.is-ok strong {
+  color: var(--green-deep);
+}
+
+/* ===========================
+   PHASE 2 — SMART CO-PILOT & INTERACTIVE VISION BOXES
+   =========================== */
+
+.fpv-boxes-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.fpv-detect-box {
+  pointer-events: auto;
+  cursor: pointer;
+  position: absolute;
+  border: 2px solid #38bdf8;
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.08);
+  padding: 0;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.fpv-detect-box:hover {
+  background: rgba(56, 189, 248, 0.2);
+}
+
+.fpv-detect-box.is-locked {
+  border-color: #f97316;
+  border-width: 2.5px;
+  background: rgba(249, 115, 22, 0.16);
+}
+
+.fpv-box-tag {
+  position: absolute;
+  left: -2px;
+  top: -22px;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(15, 20, 29, 0.86);
+  color: #7dd3fc;
+}
+
+.fpv-detect-box.is-locked .fpv-box-tag {
+  background: #ea580c;
+  color: #ffffff;
+}
+
+.copilot-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-hairline);
+}
+
+.copilot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.copilot-status-text {
+  font-size: 0.79rem;
+  font-weight: 700;
+  color: var(--ink-secondary);
+}
+
+.fpv-box-tag.is-inside {
+  top: 4px;
+  left: 4px;
+}
+
+/* ===========================
+   PHASE 3 — LIVE 2D ROOM MAP & DISCOVERY FEED
+   =========================== */
+
+.explorer-intel-grid {
+  display: grid;
+  grid-template-columns: minmax(290px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.map-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.map-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+}
+
+.map-canvas-wrap {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 2px solid #222936;
+  background: #0f141d;
+  box-shadow: inset 0 4px 14px rgba(0, 0, 0, 0.55);
+}
+
+.room-map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.map-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.map-stats-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 11px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-hairline);
+}
+
+.map-stats-grid strong {
+  font-size: 0.92rem;
+}
+
+.discovery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 10px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.discovery-card {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
+}
+
+.discovery-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+  background: #0f141d;
+}
+
+.discovery-meta {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.discovery-meta strong {
+  font-size: 0.84rem;
+  text-transform: capitalize;
+}
+
+@media (max-width: 860px) {
+  .explorer-intel-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Vernie Pilot — Tactile, User-Friendly Progressive Web App for LEGO BOOST Vernie OS.
-// Supports both live Web Bluetooth hardware control and a built-in interactive Demo Simulator.
+// Supports Tank/Rover FPV mode (Android Phone <-> Chromebook + Xbox Controller),
+// Vernie humanoid mode, live Web Bluetooth control, and built-in interactive Demo Simulator.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -13,21 +14,22 @@ import {
 } from "@core/ble/protocol";
 import { ConnectionState, VernieClient } from "@core/ble/vernieClient";
 import { DriveStation } from "./components/DriveStation";
-import { EyesVoiceStation } from "./components/EyesVoiceStation";
 import {
   IconBlocks,
-  IconEye,
+  IconCamera,
   IconJoystick,
   IconMusic,
   IconWrench,
 } from "./components/Icons";
 import { MusicLightStation } from "./components/MusicLightStation";
 import { RoutinesStation } from "./components/RoutinesStation";
+import { RoverCockpitStation } from "./components/RoverCockpitStation";
 import { SetupStation } from "./components/SetupStation";
 import { TopConsoleBar } from "./components/TopConsoleBar";
+import { ChassisProfile } from "./components/VernieTwin";
 import { VirtualVernieSimulator, VirtualVisualState } from "./sim/virtualVernie";
 
-type PilotStation = "drive" | "music" | "routines" | "eyes" | "setup";
+type PilotStation = "drive" | "fpv" | "music" | "routines" | "setup";
 
 const INITIAL_VISUAL: VirtualVisualState = {
   hubRgb: [0, 168, 232],
@@ -43,16 +45,29 @@ const INITIAL_VISUAL: VirtualVisualState = {
   headingDeg: 0,
 };
 
+function readInitialChassis(): ChassisProfile {
+  try {
+    const saved = window.localStorage.getItem("vernie-pilot-chassis");
+    if (saved === "vernie" || saved === "rover") return saved;
+  } catch {
+    // ignore storage restrictions
+  }
+  return "rover";
+}
+
 export const App: React.FC = () => {
   const bleSupported = typeof navigator !== "undefined" && Boolean(navigator.bluetooth);
   const [station, setStation] = useState<PilotStation>("drive");
+  const [chassis, setChassis] = useState<ChassisProfile>(readInitialChassis);
+  const [headlightsOn, setHeadlightsOn] = useState(false);
+
   const [connState, setConnState] = useState<ConnectionState>("disconnected");
   const [deviceName, setDeviceName] = useState("VernieOS");
   const [bleTelemetry, setBleTelemetry] = useState<TelemetryFrame | null>(null);
   const [rxHz, setRxHz] = useState(0);
   const [bleError, setBleError] = useState<string | null>(null);
 
-  // Optimistic visual state for live BLE (mirrors Hub LED, Chest LED, and dart launch animation)
+  // Optimistic visual state for live BLE
   const [bleHubRgb, setBleHubRgb] = useState<[number, number, number]>([0, 168, 232]);
   const [bleChestLed, setBleChestLed] = useState<number>(ChestLedState.OFF);
   const [bleHoming, setBleHoming] = useState(false);
@@ -65,6 +80,15 @@ export const App: React.FC = () => {
 
   const timestampsRef = useRef<number[]>([]);
   const lastRxRef = useRef<number>(0);
+
+  const handleChassisChange = useCallback((next: ChassisProfile) => {
+    setChassis(next);
+    try {
+      window.localStorage.setItem("vernie-pilot-chassis", next);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const sim = useMemo(
     () =>
@@ -179,7 +203,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Unified command dispatchers (route to Live BLE or Demo Simulator cleanly)
   const handleDrive = useCallback(
     (left: number, right: number, timeoutMs = 400) => {
       if (isLiveBle) {
@@ -309,9 +332,9 @@ export const App: React.FC = () => {
     icon: React.ReactNode;
   }> = [
     { id: "drive", label: "Drive", icon: <IconJoystick size={18} /> },
+    { id: "fpv", label: "FPV Rover", icon: <IconCamera size={18} /> },
     { id: "music", label: "Music & Lights", icon: <IconMusic size={18} /> },
     { id: "routines", label: "Routines", icon: <IconBlocks size={18} /> },
-    { id: "eyes", label: "Eyes & Voice", icon: <IconEye size={18} /> },
     { id: "setup", label: "Setup", icon: <IconWrench size={18} /> },
   ];
 
@@ -358,6 +381,8 @@ export const App: React.FC = () => {
       <main className="pilot-workspace">
         {station === "drive" && (
           <DriveStation
+            chassis={chassis}
+            headlightsOn={headlightsOn}
             connected={isOnline}
             demoMode={isDemoActive}
             disabled={motionDisabled}
@@ -371,6 +396,8 @@ export const App: React.FC = () => {
             onDartSubcmd={handleDart}
             onSetMode={handleSetMode}
             onSynth={handleSynth}
+            onChangeChassis={handleChassisChange}
+            onOpenFpv={() => setStation("fpv")}
             onLaunchDemo={() => {
               setBleError(null);
               setDemoMode(true);
@@ -378,6 +405,37 @@ export const App: React.FC = () => {
             onDemoTogglePickup={() => sim.togglePickedUp()}
             onDemoBump={() => sim.triggerBump()}
             onDemoBrick={(cid) => sim.presentColorBrick(cid)}
+          />
+        )}
+
+        {station === "fpv" && (
+          <RoverCockpitStation
+            connected={isOnline}
+            demoMode={isDemoActive}
+            disabled={motionDisabled}
+            safeMode={safeMode}
+            headHomed={headHomed}
+            headDeg={activeTelemetry?.headDeg ?? 0}
+            pickedUp={pickedUp}
+            distancePct={activeTelemetry?.distancePct ?? 255}
+            telemetry={activeTelemetry}
+            floorX={demoVisual.floorX}
+            floorY={demoVisual.floorY}
+            headingDeg={demoVisual.headingDeg}
+            headlightsOn={headlightsOn}
+            onHeadlightsChange={setHeadlightsOn}
+            onSimulatedDistance={(pct) => sim.setSimulatedDistance(pct)}
+            onLaunchDemo={() => {
+              setBleError(null);
+              setDemoMode(true);
+            }}
+            onDrive={handleDrive}
+            onHead={handleHead}
+            onSynth={handleSynth}
+            onSetHubLed={handleHubLed}
+            onSetMode={handleSetMode}
+            onPlayMacro={handlePlayMacro}
+            onStopMacro={handleStopMacro}
           />
         )}
 
@@ -405,25 +463,6 @@ export const App: React.FC = () => {
             onPlayMacro={handlePlayMacro}
             onStopMacro={handleStopMacro}
             onClearMacro={handleClearMacro}
-          />
-        )}
-
-        {station === "eyes" && (
-          <EyesVoiceStation
-            connected={isOnline}
-            disabled={motionDisabled}
-            safeMode={safeMode}
-            headHomed={headHomed}
-            headDeg={activeTelemetry?.headDeg ?? 0}
-            pickedUp={pickedUp}
-            distancePct={activeTelemetry?.distancePct ?? 255}
-            onDrive={handleDrive}
-            onHead={handleHead}
-            onSynth={handleSynth}
-            onSetHubLed={handleHubLed}
-            onSetMode={handleSetMode}
-            onPlayMacro={handlePlayMacro}
-            onStopMacro={handleStopMacro}
           />
         )}
 

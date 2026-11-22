@@ -241,17 +241,19 @@ export class VirtualVernieSimulator {
       }
     }
 
-    // 4. Integrate wheel encoders & virtual floor pose
+    // 4. Integrate wheel encoders & virtual floor pose (in cm inside 460x460 cm arena)
     const dtSec = dtMs / 1000;
+    let poseMoved = false;
     if (this.speedA !== 0 || this.speedB !== 0) {
       this.encA += this.speedA * 2.8 * dtSec;
       this.encB += this.speedB * 2.8 * dtSec;
-      const linear = ((this.speedA + this.speedB) / 2) * 0.45 * dtSec;
-      const turn = ((this.speedA - this.speedB) / 2) * 1.6 * dtSec;
-      this.headingDeg = (this.headingDeg + turn + 360) % 360;
+      const linearCm = ((this.speedA + this.speedB) / 2) * 0.42 * dtSec;
+      const turnDeg = ((this.speedA - this.speedB) / 2) * 1.35 * dtSec;
+      this.headingDeg = (this.headingDeg + turnDeg + 360) % 360;
       const rad = (this.headingDeg * Math.PI) / 180;
-      this.floorX = clamp(this.floorX + Math.sin(rad) * linear, -100, 100);
-      this.floorY = clamp(this.floorY + Math.cos(rad) * linear, -100, 100);
+      this.floorX = clamp(this.floorX + Math.sin(rad) * linearCm, -208, 208);
+      this.floorY = clamp(this.floorY + Math.cos(rad) * linearCm, -208, 208);
+      poseMoved = true;
       // Slight pitch kick on acceleration
       const accelPitch = clamp(((this.speedA + this.speedB) / 2) * 0.06, -6, 6);
       this.pitchDeg = this.pickedUp ? 22 : accelPitch;
@@ -273,6 +275,20 @@ export class VirtualVernieSimulator {
     this.batteryMv = clamp(8420 - loadDrop + Math.sin(this.tickCount * 0.15) * 8, 6200, 9000);
 
     this.callbacks.onTelemetry(this.getFrame(now));
+    if (poseMoved) {
+      this.emitVisual();
+    }
+  }
+
+  setSimulatedDistance(pct: number): void {
+    this.distancePct = clamp(Math.round(pct), 5, 100);
+  }
+
+  resetArenaPose(): void {
+    this.floorX = 0;
+    this.floorY = 0;
+    this.headingDeg = 0;
+    this.emitVisual();
   }
 
   private beginMacroStep(idx: number, now: number): void {

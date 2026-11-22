@@ -141,3 +141,51 @@ export const IconRefresh: React.FC<IconProps> = ({ size = 16, className }) => (
     <path d="M20 4v7h-7" />
   </svg>
 );
+
+export const IconGamepad: React.FC<IconProps> = ({ size = 18, className }) => (
+  <svg {...base(size)} className={className}>
+    <rect x="2.5" y="7" width="19" height="10" rx="5" />
+    <path d="M7 10.5v3M5.5 12h3" />
+    <circle cx="15.5" cy="10.8" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="17.7" cy="12.6" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconWifi: React.FC<IconProps> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}>
+    <path d="M5 12.6a10 10 0 0 1 14 0" />
+    <path d="M8.5 16.1a5.5 5.5 0 0 1 7 0" />
+    <circle cx="12" cy="19.2" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconFlashlight: React.FC<IconProps> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}>
+    <path d="M12 3v3M5.6 5.6l2.1 2.1M18.4 5.6l-2.1 2.1" />
+    <path d="M8 10h8l-1.5 4v7h-5v-7L8 10Z" />
+  </svg>
+);
+
+export const IconCompass: React.FC<IconProps> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <polygon points="15.2 8.8 13.4 13.4 8.8 15.2 10.6 10.6 15.2 8.8" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconMap: React.FC<IconProps> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}>
+    <polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6" />
+    <path d="M9 3v15M15 6v15" />
+  </svg>
+);
+
+export const IconTank: React.FC<IconProps> = ({ size = 18, className }) => (
+  <svg {...base(size)} className={className}>
+    <rect x="3" y="13" width="18" height="6" rx="3" />
+    <path d="M6 13V9a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v4" />
+    <circle cx="13.5" cy="10" r="1.4" />
+    <path d="M6.5 16h11" />
+  </svg>
+);
+

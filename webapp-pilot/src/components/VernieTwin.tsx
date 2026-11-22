@@ -6,7 +6,11 @@
 import React, { useEffect, useState } from "react";
 import { ChestLedState, MODE_NAMES, TelemetryFlag, TelemetryFrame } from "@core/ble/protocol";
 
+export type ChassisProfile = "rover" | "vernie";
+
 export interface VernieTwinProps {
+  chassis?: ChassisProfile;
+  headlightsOn?: boolean;
   connected: boolean;
   demoMode: boolean;
   telemetry: TelemetryFrame | null;
@@ -38,6 +42,8 @@ const CHEST_LED_HEX: Record<number, string> = {
 };
 
 export const VernieTwin: React.FC<VernieTwinProps> = ({
+  chassis = "vernie",
+  headlightsOn = false,
   connected,
   demoMode,
   telemetry,
@@ -51,6 +57,7 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
   onDemoBump,
   onDemoBrick,
 }) => {
+  const isRover = chassis === "rover";
   const [blinking, setBlinking] = useState(false);
   const [dartFlash, setDartFlash] = useState(false);
 
@@ -135,7 +142,7 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
     : "Standby";
 
   return (
-    <div className="twin-frame" aria-label="Live interactive Vernie robot preview">
+    <div className="twin-frame" aria-label={isRover ? "Live interactive Tank Rover preview" : "Live interactive Vernie robot preview"}>
       <div className="twin-visor-stage">
         {/* Top HUD inside the dark studio stage */}
         <div className="twin-hud-top">
@@ -147,16 +154,25 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
             <span className="twin-hud-label">{modeLabel}</span>
           </div>
           <div className="twin-hud-chips">
-            {homingInProgress && <span className="visor-chip visor-chip-amber">CALIBRATING HEAD…</span>}
-            {!homingInProgress && connected && (
-              <span className={`visor-chip ${headHomed ? "visor-chip-green" : ""}`}>
-                {headHomed ? `HEAD ${headDeg}°` : "HEAD UNCALIBRATED"}
-              </span>
+            {isRover ? (
+              <>
+                <span className="visor-chip visor-chip-cyan">TANK ROVER</span>
+                {headlightsOn && <span className="visor-chip visor-chip-amber">HEADLIGHTS ON</span>}
+              </>
+            ) : (
+              <>
+                {homingInProgress && <span className="visor-chip visor-chip-amber">CALIBRATING HEAD…</span>}
+                {!homingInProgress && connected && (
+                  <span className={`visor-chip ${headHomed ? "visor-chip-green" : ""}`}>
+                    {headHomed ? `HEAD ${headDeg}°` : "HEAD UNCALIBRATED"}
+                  </span>
+                )}
+                {dartArmed && <span className="visor-chip visor-chip-red">DART ARMED</span>}
+              </>
             )}
             {pickedUp && <span className="visor-chip visor-chip-orange">PICKED UP</span>}
             {bump && <span className="visor-chip visor-chip-orange">BUMP</span>}
             {tap && <span className="visor-chip visor-chip-cyan">TAP</span>}
-            {dartArmed && <span className="visor-chip visor-chip-red">DART ARMED</span>}
             {synthActive && <span className="visor-chip visor-chip-cyan">SINGING</span>}
           </div>
         </div>
@@ -286,6 +302,87 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
                   <circle cx="257" cy="226" r="8" fill="#0EA5E9" opacity="0.28" />
                 </g>
 
+                {isRover ? (
+                  <g>
+                    {/* Headlight twin beam cones when phone torch is ON */}
+                    {headlightsOn && (
+                      <g opacity="0.28">
+                        <polygon points="108,82 54,14 148,14" fill="#FEF08A" />
+                        <polygon points="212,82 172,14 266,14" fill="#FEF08A" />
+                      </g>
+                    )}
+
+                    {/* Low-slung flat Move Hub armored chassis deck */}
+                    <rect x="82" y="138" width="156" height="98" rx="22" fill="url(#vWhite)" stroke="#CBD5E1" strokeWidth="2.5" />
+                    {/* Cyan armored front slope */}
+                    <path d="M94 138 H226 L216 156 H104 Z" fill="url(#vCyan)" />
+                    {/* Orange side roll-cage rails */}
+                    <rect x="76" y="148" width="10" height="72" rx="5" fill="url(#vOrange)" />
+                    <rect x="234" y="148" width="10" height="72" rx="5" fill="url(#vOrange)" />
+
+                    {/* Front-bumper 88007 proximity & color radar bar */}
+                    <rect x="108" y="166" width="104" height="32" rx="9" fill="#18202C" stroke="#334155" strokeWidth="2" />
+                    <circle cx="136" cy="182" r="9" fill="#0B0F17" stroke={chestHex} strokeWidth="2.5" />
+                    <circle cx="136" cy="182" r="3.6" fill={chestHex} opacity={connected ? 0.92 : 0.25} />
+                    <circle cx="184" cy="182" r="9" fill="#0B0F17" stroke="#475569" strokeWidth="2" />
+                    <circle cx="184" cy="182" r="3.6" fill={detectedBrick && detectedBrick.hex !== "transparent" ? detectedBrick.hex : "#334155"} />
+                    {connected && sensorOk && distPct !== null && distPct < 75 && (
+                      <path
+                        d="M 142 204 Q 160 214 178 204"
+                        fill="none"
+                        stroke={distPct <= 35 ? "#F59E0B" : "#38BDF8"}
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                      />
+                    )}
+
+                    {/* Hub RGB Glow + iconic green power button */}
+                    {connected && <circle cx="160" cy="218" r="20" fill="url(#hubGlow)" />}
+                    <rect x="142" y="210" width="36" height="16" rx="8" fill="#16A34A" stroke="#15803D" strokeWidth="1.5" />
+                    <rect x="147" y="213" width="26" height="4.5" rx="2" fill="#86EFAC" opacity="0.6" />
+
+                    {/* Low-center Android Phone Camera Cradle (optional Port C pan rotates pod) */}
+                    <g
+                      style={{
+                        transform: `translateX(${headShiftX * 0.6}px) rotate(${headRot * 0.7}deg)`,
+                        transformOrigin: "160px 128px",
+                        transition: "transform 160ms cubic-bezier(0.22, 1, 0.36, 1)",
+                      }}
+                    >
+                      {/* Cradle brackets */}
+                      <rect x="108" y="124" width="18" height="20" rx="5" fill="#475569" />
+                      <rect x="194" y="124" width="18" height="20" rx="5" fill="#475569" />
+                      {/* Mounted Android Phone Landscape Body */}
+                      <rect x="92" y="64" width="136" height="68" rx="16" fill="#1E2532" stroke="#475569" strokeWidth="2.5" />
+                      <rect x="100" y="72" width="120" height="52" rx="10" fill="#0F141D" />
+                      {/* Rear wide-angle camera lens */}
+                      <circle cx="144" cy="98" r="18" fill="#18212F" stroke={eyeAccent} strokeWidth="3" />
+                      <circle cx="144" cy="98" r="9.5" fill="#0B0F17" stroke="#38BDF8" strokeWidth="1.8" />
+                      <circle cx="141" cy="95" r="3" fill="#E0F2FE" opacity="0.85" />
+                      {/* Secondary wide lens */}
+                      <circle cx="182" cy="90" r="8.5" fill="#18212F" stroke="#475569" strokeWidth="2" />
+                      <circle cx="182" cy="90" r="3.5" fill="#38BDF8" opacity="0.55" />
+                      {/* LED Flashlight / Headlight emitter */}
+                      <circle
+                        cx="182"
+                        cy="108"
+                        r="6"
+                        fill={headlightsOn ? "#FEF08A" : "#334155"}
+                        stroke={headlightsOn ? "#FACC15" : "#475569"}
+                        strokeWidth="1.8"
+                      />
+                      {/* Status LED bar on cradle */}
+                      <rect x="110" y="80" width="6" height="36" rx="3" fill={connected ? "#22C55E" : "#475569"} />
+                      {synthActive && (
+                        <g stroke="#38BDF8" strokeWidth="2.2" fill="none" strokeLinecap="round" opacity="0.9">
+                          <path d="M78 86 Q70 98 78 110" />
+                          <path d="M242 86 Q250 98 242 110" />
+                        </g>
+                      )}
+                    </g>
+                  </g>
+                ) : (
+                  <>
                 {/* SHOULDER DART LAUNCHER POD (Right shoulder) */}
                 <g>
                   <rect x="220" y="96" width="42" height="30" rx="8" fill="#2A3240" stroke="#475569" strokeWidth="2" />
@@ -430,6 +527,8 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
                     <rect x="168" y="40" width="46" height="10" rx="5" fill="url(#vOrange)" />
                   </g>
                 </g>
+                  </>
+                )}
               </g>
             </svg>
           </button>
