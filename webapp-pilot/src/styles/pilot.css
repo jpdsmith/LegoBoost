@@ -2811,6 +2811,36 @@ a:focus-visible {
   line-height: 1.5;
 }
 
+.fpv-connecting-card {
+  z-index: 5;
+  background: radial-gradient(circle at 50% 40%, rgba(28, 36, 50, 0.92) 0%, rgba(13, 17, 24, 0.96) 80%);
+  padding-top: 44px;
+  padding-bottom: 54px;
+}
+
+.fpv-progress-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.fpv-diag-note {
+  color: #e2e8f0 !important;
+  font-weight: 600;
+}
+
+.fpv-diag-sub {
+  font-size: 0.78rem !important;
+  color: #94a3b8 !important;
+}
+
+.fpv-diag-error {
+  color: #fca5a5 !important;
+  font-weight: 600;
+}
+
 .fpv-hud-svg {
   position: absolute;
   inset: 0;

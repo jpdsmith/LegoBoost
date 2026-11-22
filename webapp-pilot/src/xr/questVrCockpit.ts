@@ -649,6 +649,7 @@ export function drawVrHudDashboard(canvas: HTMLCanvasElement, state: VrHudState)
 
 export interface QuestVrSessionCallbacks {
   getVideoElement: () => HTMLVideoElement | null;
+  getFallbackCanvas?: () => HTMLCanvasElement | null;
   getHudState: () => VrHudState;
   onControlFrame: (sample: QuestControlSample) => void;
   onSessionEnd: () => void;
@@ -857,12 +858,23 @@ export class QuestVrCockpitSession {
         callbacks.onControlFrame(sample);
       }
 
-      // Upload live phone WebRTC video frame directly on GPU (72 FPS!)
+      // Upload live phone WebRTC video frame directly on GPU (72 FPS), or fallback JPEG canvas!
       const videoEl = callbacks.getVideoElement();
-      if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+      const fbCanvas = callbacks.getFallbackCanvas?.() ?? null;
+      const texSource: HTMLVideoElement | HTMLCanvasElement | null =
+        videoEl &&
+        !videoEl.classList.contains("is-hidden") &&
+        videoEl.readyState >= 2 &&
+        videoEl.videoWidth > 16 &&
+        videoEl.videoHeight > 16
+          ? videoEl
+          : fbCanvas && fbCanvas.width > 16 && fbCanvas.height > 16
+            ? fbCanvas
+            : null;
+      if (texSource) {
         gl.bindTexture(gl.TEXTURE_2D, videoTex);
         try {
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoEl);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texSource);
         } catch {
           // ignore transient video frame race
         }

@@ -19,9 +19,16 @@ import {
   encodeRemainingLength,
   generateRoomCode,
   normalizeRoomCode,
+  safeCloseWebSocket,
   SignalingChunkReassembler,
 } from "./rtc/mqttSignaling";
-import { parseBridgeMessage, DriverToRoverMessage } from "./rtc/roverBridge";
+import {
+  classifyIceCandidate,
+  countCandidatesInSdp,
+  DriverToRoverMessage,
+  parseBridgeMessage,
+  RoverToDriverMessage,
+} from "./rtc/roverBridge";
 import { computeHouseholdTopic } from "./rtc/wifiDiscovery";
 
 function makePad(overrides: Partial<GamepadLike> = {}): GamepadLike {
@@ -174,12 +181,85 @@ describe("Phase 1 — Dual-Relay Port-443 + MQTT Signaling & Auto-Discovery", ()
   });
 });
 
-describe("Phase 1 — WebRTC Rover Bridge Message Parsing", () => {
-  it("parses valid DriverToRover messages and rejects corrupt JSON safely", () => {
+describe("Phase 1 — WebRTC Rover Bridge Message Parsing & ICE Diagnostics", () => {
+  it("parses valid DriverToRover & RoverToDriver fallback messages and rejects corrupt JSON safely", () => {
     const parsed = parseBridgeMessage<DriverToRoverMessage>(
       '{"type":"drive","left":50,"right":50,"timeoutMs":400,"seq":1,"sentAt":1000}'
     );
     expect(parsed?.type).toBe("drive");
+
+    const fbReq = parseBridgeMessage<DriverToRoverMessage>(
+      '{"type":"videoFallback","enabled":true,"fps":7,"maxWidth":288}'
+    );
+    expect(fbReq).toEqual({ type: "videoFallback", enabled: true, fps: 7, maxWidth: 288 });
+
+    const frame = parseBridgeMessage<RoverToDriverMessage>(
+      '{"type":"jpegFrame","dataUrl":"data:image/jpeg;base64,AA==","width":288,"height":162,"ts":1234}'
+    );
+    expect(frame?.type).toBe("jpegFrame");
     expect(parseBridgeMessage("not-json{")).toBeNull();
+  });
+
+  it("defers WebSocket close when CONNECTING to avoid browser console errors", () => {
+    let closedCount = 0;
+    const mockConnecting = {
+      readyState: WebSocket.CONNECTING,
+      onopen: null as (() => void) | null,
+      onmessage: () => undefined,
+      onerror: () => undefined,
+      onclose: () => undefined,
+      close: () => {
+        closedCount += 1;
+      },
+    } as unknown as WebSocket;
+
+    safeCloseWebSocket(mockConnecting);
+    expect(closedCount).toBe(0);
+    expect(mockConnecting.onmessage).toBeNull();
+    expect(typeof mockConnecting.onopen).toBe("function");
+    (mockConnecting.onopen as () => void)();
+    expect(closedCount).toBe(1);
+
+    let openClosed = 0;
+    const mockOpen = {
+      readyState: WebSocket.OPEN,
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+      close: () => {
+        openClosed += 1;
+      },
+    } as unknown as WebSocket;
+    safeCloseWebSocket(mockOpen);
+    expect(openClosed).toBe(1);
+  });
+
+  it("classifies LAN IPv4 host, mDNS .local, STUN srflx, and TURN relay SDP candidates accurately", () => {
+    expect(
+      classifyIceCandidate("candidate:1 1 udp 2122260223 192.168.1.45 54321 typ host")
+    ).toBe("hostIpv4");
+    expect(
+      classifyIceCandidate("candidate:2 1 udp 2122194687 a1b2c3d4.local 54322 typ host")
+    ).toBe("mdns");
+    expect(
+      classifyIceCandidate("candidate:3 1 udp 1686052607 203.0.113.5 54321 typ srflx raddr 0.0.0.0")
+    ).toBe("srflx");
+    expect(
+      classifyIceCandidate("candidate:4 1 udp 41885439 198.51.100.2 3478 typ relay")
+    ).toBe("relay");
+
+    const sdp = [
+      "v=0",
+      "a=candidate:1 1 udp 2122260223 192.168.1.45 54321 typ host",
+      "a=candidate:2 1 udp 2122194687 a1b2c3d4.local 54322 typ host",
+      "a=candidate:3 1 udp 1686052607 203.0.113.5 54321 typ srflx raddr 0.0.0.0",
+    ].join("\r\n");
+    expect(countCandidatesInSdp(sdp)).toEqual({
+      hostIpv4: 1,
+      mdns: 1,
+      srflx: 1,
+      relay: 0,
+    });
   });
 });

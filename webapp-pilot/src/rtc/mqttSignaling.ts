@@ -5,6 +5,7 @@
 
 export const DEFAULT_SIGNALING_BROKERS = [
   "wss://broker.emqx.io:8084/mqtt",
+  "wss://test.mosquitto.org:8081/mqtt",
   "wss://broker.hivemq.com:8884/mqtt",
 ];
 
@@ -12,6 +13,49 @@ export const DEFAULT_NTFY_ORIGIN = "https://ntfy.sh";
 
 const textEnc = new TextEncoder();
 const textDec = new TextDecoder();
+
+/**
+ * Close a WebSocket safely without triggering Chrome's
+ * "WebSocket is closed before the connection is established" console error.
+ * If the socket is still CONNECTING, strip handlers and close cleanly as soon as it opens.
+ */
+export function safeCloseWebSocket(
+  ws: WebSocket | null,
+  beforeClose?: (socket: WebSocket) => void
+): void {
+  if (!ws) return;
+  ws.onmessage = null;
+  ws.onerror = null;
+  ws.onclose = null;
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.onopen = null;
+    try {
+      beforeClose?.(ws);
+    } catch {
+      // ignore
+    }
+    try {
+      ws.close();
+    } catch {
+      // ignore
+    }
+  } else if (ws.readyState === WebSocket.CONNECTING) {
+    ws.onopen = () => {
+      try {
+        beforeClose?.(ws);
+      } catch {
+        // ignore
+      }
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+    };
+  } else {
+    ws.onopen = null;
+  }
+}
 
 export function encodeRemainingLength(len: number): number[] {
   const out: number[] = [];
@@ -242,12 +286,15 @@ export function sanitizeNtfyTopic(topic: string): string {
 }
 
 /**
- * Standard Port-443 HTTPS/WSS pub-sub signaling via ntfy.sh (works even on strict firewalls
- * that block MQTT ports 8084/8884!). Uses WebSocket subscribe + plain-text CORS-simple POST.
+ * Standard Port-443 HTTPS/WSS pub-sub fallback via ntfy.sh (used ONLY when all MQTT WSS
+ * ports are blocked by a strict firewall, avoiding ntfy.sh's 250 msg/day free-tier quota).
  */
 export class NtfySignalingChannel {
   private ws: WebSocket | null = null;
+  private connectingWs: WebSocket | null = null;
   private closed = false;
+  private rateLimitedUntil = 0;
+  private sendQueue: Promise<void> = Promise.resolve();
   private readonly safeTopic: string;
   private readonly reassembler = new SignalingChunkReassembler();
 
@@ -271,27 +318,26 @@ export class NtfySignalingChannel {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const ws = new WebSocket(wsUrl);
+      this.connectingWs = ws;
 
       const timeout = setTimeout(() => {
         if (!settled) {
           settled = true;
-          try {
-            ws.close();
-          } catch {
-            // ignore
-          }
+          if (this.connectingWs === ws) this.connectingWs = null;
+          safeCloseWebSocket(ws);
           reject(new Error("HTTPS relay timeout (ntfy.sh)"));
         }
       }, 6000);
 
       ws.onmessage = (ev) => {
-        if (typeof ev.data !== "string") return;
+        if (this.closed || typeof ev.data !== "string") return;
         try {
           const frame = JSON.parse(ev.data) as { event?: string; message?: string };
           if (frame.event === "open") {
             if (!settled) {
               settled = true;
               clearTimeout(timeout);
+              if (this.connectingWs === ws) this.connectingWs = null;
               this.ws = ws;
               resolve();
             }
@@ -307,11 +353,15 @@ export class NtfySignalingChannel {
       };
 
       ws.onopen = () => {
-        // Some proxies deliver 'open' frame immediately; resolve soon if already connected
+        if (this.closed) {
+          safeCloseWebSocket(ws);
+          return;
+        }
         setTimeout(() => {
-          if (!settled && ws.readyState === WebSocket.OPEN) {
+          if (!settled && !this.closed && ws.readyState === WebSocket.OPEN) {
             settled = true;
             clearTimeout(timeout);
+            if (this.connectingWs === ws) this.connectingWs = null;
             this.ws = ws;
             resolve();
           }
@@ -322,14 +372,14 @@ export class NtfySignalingChannel {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
+          if (this.connectingWs === ws) this.connectingWs = null;
           reject(new Error("HTTPS relay connection failed (ntfy.sh)"));
         }
       };
 
       ws.onclose = () => {
-        if (this.ws === ws) {
-          this.ws = null;
-        }
+        if (this.ws === ws) this.ws = null;
+        if (this.connectingWs === ws) this.connectingWs = null;
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
@@ -340,43 +390,48 @@ export class NtfySignalingChannel {
   }
 
   publish(payload: string): void {
-    if (this.closed) return;
+    if (this.closed || Date.now() < this.rateLimitedUntil) return;
     const chunks = chunkSignalingPayload(payload, 2400);
     const url = `${this.origin}/${this.safeTopic}`;
-    void (async () => {
+    this.sendQueue = this.sendQueue.then(async () => {
       for (const chunk of chunks) {
-        if (this.closed) return;
+        if (this.closed || Date.now() < this.rateLimitedUntil) return;
         try {
           // Plain-text body without custom headers avoids CORS preflight!
-          await fetch(url, {
+          const res = await fetch(url, {
             method: "POST",
             body: chunk,
           });
+          if (res.status === 429) {
+            const retrySec = Number.parseInt(res.headers.get("retry-after") ?? "60", 10);
+            this.rateLimitedUntil = Date.now() + Math.max(30, Math.min(300, retrySec || 60)) * 1000;
+            return;
+          }
         } catch {
-          // ignore transient send error; peer retries hello automatically
+          // ignore transient send error; peer retries cleanly
         }
       }
-    })();
+    });
   }
 
   close(): void {
     this.closed = true;
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
-    }
+    safeCloseWebSocket(this.connectingWs);
+    this.connectingWs = null;
+    safeCloseWebSocket(this.ws);
+    this.ws = null;
   }
 }
 
 export class MqttSignalingChannel {
   private ws: WebSocket | null = null;
+  private connectingWs: WebSocket | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private brokerUsed = "";
+  private lastBrokers: string[] = DEFAULT_SIGNALING_BROKERS;
+  private reconnectAttempts = 0;
   private rxBuf: Uint8Array = new Uint8Array(0);
 
   constructor(
@@ -389,12 +444,25 @@ export class MqttSignalingChannel {
     return this.brokerUsed;
   }
 
+  getBrokerShortName(): string {
+    if (this.brokerUsed.includes("emqx")) return "EMQX";
+    if (this.brokerUsed.includes("mosquitto")) return "Mosquitto";
+    if (this.brokerUsed.includes("hivemq")) return "HiveMQ";
+    return "MQTT-WSS";
+  }
+
   isOpen(): boolean {
     return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
   }
 
+  getBufferedAmount(): number {
+    return this.ws ? this.ws.bufferedAmount : 0;
+  }
+
   async connect(brokers: string[] = DEFAULT_SIGNALING_BROKERS): Promise<void> {
     this.closed = false;
+    this.lastBrokers = brokers;
+    this.reconnectAttempts = 0;
     let lastError: Error = new Error("Unable to reach MQTT signaling relay");
 
     for (const url of brokers) {
@@ -410,19 +478,39 @@ export class MqttSignalingChannel {
     throw lastError;
   }
 
+  private scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer || this.reconnectAttempts >= 6) return;
+    this.reconnectAttempts += 1;
+    const delay = Math.min(6000, 1200 * this.reconnectAttempts);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || this.isOpen()) return;
+      const ordered = this.brokerUsed
+        ? [this.brokerUsed, ...this.lastBrokers.filter((b) => b !== this.brokerUsed)]
+        : this.lastBrokers;
+      void this.connect(ordered).catch(() => {
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
   private connectSingle(url: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       this.rxBuf = new Uint8Array(0);
       const ws = new WebSocket(url, "mqtt");
       ws.binaryType = "arraybuffer";
+      this.connectingWs = ws;
 
       const finishReady = () => {
-        if (settled) return;
+        if (settled || this.closed) return;
         settled = true;
         clearTimeout(timeout);
+        if (this.connectingWs === ws) this.connectingWs = null;
         this.ws = ws;
+        this.reconnectAttempts = 0;
         this.onStatus?.("Signaling ready");
+        if (this.pingTimer) clearInterval(this.pingTimer);
         this.pingTimer = setInterval(() => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(new Uint8Array([0xc0, 0x00])); // PINGREQ
@@ -434,21 +522,23 @@ export class MqttSignalingChannel {
       const timeout = setTimeout(() => {
         if (!settled) {
           settled = true;
-          try {
-            ws.close();
-          } catch {
-            // ignore
-          }
+          if (this.connectingWs === ws) this.connectingWs = null;
+          safeCloseWebSocket(ws);
           reject(new Error(`Signaling relay timeout (${url})`));
         }
-      }, 6000);
+      }, 5500);
 
       ws.onopen = () => {
+        if (this.closed) {
+          safeCloseWebSocket(ws);
+          return;
+        }
         const rand = Math.random().toString(36).slice(2, 10);
         ws.send(buildMqttConnectPacket(`vp_${rand}`));
       };
 
       ws.onmessage = (ev) => {
+        if (this.closed) return;
         const chunk =
           ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : new Uint8Array(0);
         if (chunk.length === 0) return;
@@ -469,11 +559,13 @@ export class MqttSignalingChannel {
           if (pkt.type === "connack") {
             if (pkt.code === 0) {
               ws.send(buildMqttSubscribePacket(1, this.topic));
-              // Wait briefly for SUBACK so first published hello isn't missed!
+              // Wait briefly for SUBACK so first published message isn't missed
               setTimeout(finishReady, 450);
             } else if (!settled) {
               settled = true;
               clearTimeout(timeout);
+              if (this.connectingWs === ws) this.connectingWs = null;
+              safeCloseWebSocket(ws);
               reject(new Error(`MQTT CONNACK rejected (${pkt.code})`));
             }
           } else if (pkt.type === "suback") {
@@ -488,22 +580,27 @@ export class MqttSignalingChannel {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
+          if (this.connectingWs === ws) this.connectingWs = null;
           reject(new Error(`Signaling connection failed (${url})`));
         }
       };
 
       ws.onclose = () => {
-        if (this.ws === ws) {
+        const wasActive = this.ws === ws;
+        if (wasActive) {
           this.ws = null;
           if (this.pingTimer) {
             clearInterval(this.pingTimer);
             this.pingTimer = null;
           }
         }
+        if (this.connectingWs === ws) this.connectingWs = null;
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
           reject(new Error(`Signaling closed (${url})`));
+        } else if (wasActive && !this.closed) {
+          this.scheduleReconnect();
         }
       };
     });
@@ -511,7 +608,11 @@ export class MqttSignalingChannel {
 
   publish(payload: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(buildMqttPublishPacket(this.topic, payload));
+    try {
+      this.ws.send(buildMqttPublishPacket(this.topic, payload));
+    } catch {
+      // ignore transient send error
+    }
   }
 
   close(): void {
@@ -521,34 +622,43 @@ export class MqttSignalingChannel {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
-    if (this.ws) {
-      try {
-        this.ws.send(new Uint8Array([0xe0, 0x00])); // DISCONNECT
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
+    safeCloseWebSocket(this.connectingWs);
+    this.connectingWs = null;
+    safeCloseWebSocket(this.ws, (sock) => sock.send(new Uint8Array([0xe0, 0x00])));
+    this.ws = null;
   }
 }
 
+export interface MultiSignalingOptions {
+  /** Allow falling back to Port-443 ntfy.sh ONLY if every MQTT WSS broker fails. */
+  allowNtfyFallback?: boolean;
+}
+
 /**
- * Dual-Relay Signaling Channel: connects simultaneously to Port-443 ntfy.sh AND MQTT WSS,
- * publishes to all connected relays, and deduplicates incoming messages by ID.
- * Eliminates both non-443 firewall blocks and split-broker mismatches!
+ * Reliable Multi-Broker Signaling Channel:
+ *  - Primary: MQTT 3.1.1 over WSS (EMQX -> Mosquitto -> HiveMQ) with zero daily quota limits
+ *    and ~35 ms warm RTT (also powers automatic WSS Relay Fallback if direct P2P UDP is blocked!).
+ *  - Backup: Port-443 ntfy.sh ONLY when every MQTT WSS broker is blocked by a firewall.
  */
 export class MultiSignalingChannel {
   private readonly ntfy: NtfySignalingChannel;
   private readonly mqtt: MqttSignalingChannel;
+  private readonly allowNtfyFallback: boolean;
   private readonly seenIds = new Map<string, number>();
   private closed = false;
   private activeRelays: string[] = [];
 
   constructor(
     topic: string,
-    private readonly onMessage: (payload: string) => void
+    private readonly onMessage: (payload: string) => void,
+    options?: MultiSignalingOptions
   ) {
+    this.allowNtfyFallback = options?.allowNtfyFallback ?? false;
+
     const handleIncoming = (raw: string) => {
       if (this.closed) return;
       try {
@@ -579,51 +689,42 @@ export class MultiSignalingChannel {
     return [...this.activeRelays];
   }
 
+  isOpen(): boolean {
+    return this.mqtt.isOpen() || this.ntfy.isOpen();
+  }
+
+  supportsHighRateRelay(): boolean {
+    return this.mqtt.isOpen();
+  }
+
+  getBufferedAmount(): number {
+    return this.mqtt.getBufferedAmount();
+  }
+
   async connect(): Promise<void> {
     this.closed = false;
     this.activeRelays = [];
 
-    const ntfyP = this.ntfy
-      .connect()
-      .then(() => {
-        if (!this.closed) this.activeRelays.push("HTTPS-443");
-        return "HTTPS-443";
-      });
-    const mqttP = this.mqtt
-      .connect()
-      .then(() => {
-        if (!this.closed) this.activeRelays.push("MQTT-WSS");
-        return "MQTT-WSS";
-      });
+    try {
+      await this.mqtt.connect();
+      if (!this.closed) {
+        this.activeRelays = [this.mqtt.getBrokerShortName()];
+      }
+      return;
+    } catch (mqttErr) {
+      if (this.closed) return;
+      if (!this.allowNtfyFallback) {
+        throw mqttErr instanceof Error
+          ? mqttErr
+          : new Error("Could not connect to Wi-Fi pairing relay");
+      }
+    }
 
-    // Resolve as soon as AT LEAST ONE relay succeeds, while letting the second join seamlessly
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let failures = 0;
-      let lastErr: unknown = null;
-
-      const onOk = () => {
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-      const onFail = (err: unknown) => {
-        lastErr = err;
-        failures += 1;
-        if (failures >= 2 && !settled) {
-          settled = true;
-          reject(
-            lastErr instanceof Error
-              ? lastErr
-              : new Error("Could not connect to any Wi-Fi pairing relay")
-          );
-        }
-      };
-
-      ntfyP.then(onOk, onFail);
-      mqttP.then(onOk, onFail);
-    });
+    // Strict firewall fallback (Port 443 HTTPS/WSS via ntfy.sh)
+    await this.ntfy.connect();
+    if (!this.closed) {
+      this.activeRelays = ["HTTPS-443"];
+    }
   }
 
   publish(payload: string): void {
@@ -632,8 +733,14 @@ export class MultiSignalingChannel {
       __mid: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       __body: payload,
     });
-    if (this.ntfy.isOpen()) this.ntfy.publish(wrapped);
     if (this.mqtt.isOpen()) this.mqtt.publish(wrapped);
+    if (this.ntfy.isOpen()) this.ntfy.publish(wrapped);
+  }
+
+  /** High-rate publish strictly over MQTT WSS (never touches ntfy.sh quota). */
+  publishOnMqttOnly(payload: string): void {
+    if (this.closed || !this.mqtt.isOpen()) return;
+    this.mqtt.publish(payload);
   }
 
   close(): void {

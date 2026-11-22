@@ -154,16 +154,20 @@ export class WifiTankAdvertiser {
     const topic = await computeHouseholdTopic(ip);
     if (this.stopped) return false;
 
-    const ch = new MultiSignalingChannel(topic, (raw) => {
-      try {
-        const msg = JSON.parse(raw) as DiscoveryBeacon;
-        if (msg.kind === "scan" && msg.from !== this.id) {
-          this.broadcast();
+    const ch = new MultiSignalingChannel(
+      topic,
+      (raw) => {
+        try {
+          const msg = JSON.parse(raw) as DiscoveryBeacon;
+          if (msg.kind === "scan" && msg.from !== this.id) {
+            this.broadcast();
+          }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
-      }
-    });
+      },
+      { allowNtfyFallback: false }
+    );
     this.channel = ch;
 
     try {
@@ -172,9 +176,9 @@ export class WifiTankAdvertiser {
         ch.close();
         return false;
       }
-      this.onStatus?.("Broadcasting on your Wi-Fi (Chromebook will auto-discover!)");
+      this.onStatus?.("Broadcasting on your Wi-Fi (Driver will auto-discover!)");
       this.broadcast();
-      this.timer = setInterval(() => this.broadcast(), 2500);
+      this.timer = setInterval(() => this.broadcast(), 3500);
       return true;
     } catch {
       this.onStatus?.("Auto-discovery relay unavailable — use 4-letter Room Code");
@@ -243,25 +247,29 @@ export class WifiTankScanner {
     const topic = await computeHouseholdTopic(ip);
     if (this.stopped) return false;
 
-    const ch = new MultiSignalingChannel(topic, (raw) => {
-      try {
-        const msg = JSON.parse(raw) as DiscoveryBeacon;
-        if (msg.kind === "tank" && msg.code && msg.from !== this.id) {
-          const code = normalizeRoomCode(msg.code);
-          if (!code) return;
-          this.tanks.set(code, {
-            code,
-            name: msg.name || "VernieOS Tank",
-            bleConnected: Boolean(msg.bleConnected),
-            cameraReady: Boolean(msg.cameraReady),
-            lastSeenAt: Date.now(),
-          });
-          this.emitList();
+    const ch = new MultiSignalingChannel(
+      topic,
+      (raw) => {
+        try {
+          const msg = JSON.parse(raw) as DiscoveryBeacon;
+          if (msg.kind === "tank" && msg.code && msg.from !== this.id) {
+            const code = normalizeRoomCode(msg.code);
+            if (!code) return;
+            this.tanks.set(code, {
+              code,
+              name: msg.name || "VernieOS Tank",
+              bleConnected: Boolean(msg.bleConnected),
+              cameraReady: Boolean(msg.cameraReady),
+              lastSeenAt: Date.now(),
+            });
+            this.emitList();
+          }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
-      }
-    });
+      },
+      { allowNtfyFallback: false }
+    );
     this.channel = ch;
 
     try {
@@ -274,8 +282,8 @@ export class WifiTankScanner {
         "Scanning your Wi-Fi automatically — tap Start Hosting on your Android phone…"
       );
       this.probe();
-      this.scanTimer = setInterval(() => this.probe(), 3500);
-      this.pruneTimer = setInterval(() => this.pruneStale(), 2500);
+      this.scanTimer = setInterval(() => this.probe(), 4500);
+      this.pruneTimer = setInterval(() => this.pruneStale(), 3000);
       return true;
     } catch {
       this.callbacks.onStatus?.("Auto-discovery unavailable — enter 4-letter Room Code manually");
@@ -293,7 +301,7 @@ export class WifiTankScanner {
     const now = Date.now();
     let changed = false;
     for (const [code, tank] of this.tanks.entries()) {
-      if (now - tank.lastSeenAt > 10000) {
+      if (now - tank.lastSeenAt > 14000) {
         this.tanks.delete(code);
         changed = true;
       }

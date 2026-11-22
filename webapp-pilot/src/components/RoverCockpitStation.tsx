@@ -18,7 +18,9 @@ import { ExplorerFsmState, IntelligentExplorer } from "../rover/intelligentExplo
 import { RoomMapper } from "../rover/roomMap";
 import { generateRoomCode, normalizeRoomCode } from "../rtc/mqttSignaling";
 import {
+  BridgeDiagnostics,
   BridgeLinkState,
+  BridgeTransportMode,
   CollisionGuardLevel,
   DetectedObjectBox,
   DriverToRoverMessage,
@@ -288,6 +290,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const [remoteAssistIntervening, setRemoteAssistIntervening] = useState<string>("none");
   const [remoteExplorerState, setRemoteExplorerState] = useState<string>("");
   const [hasRemoteVideo, setHasRemoteVideo] = useState<boolean>(false);
+  const [hasFallbackVideo, setHasFallbackVideo] = useState<boolean>(false);
+  const [transportMode, setTransportMode] = useState<BridgeTransportMode>("none");
+  const [bridgeDiag, setBridgeDiag] = useState<BridgeDiagnostics | null>(null);
 
   // Android Rover Host state
   const [hostActive, setHostActive] = useState(false);
@@ -314,8 +319,17 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   // Refs
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const fallbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const fallbackImgBusyRef = useRef(false);
   const hostVideoRef = useRef<HTMLVideoElement | null>(null);
   const visionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hostJpegCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hostJpegFallbackRef = useRef<{ enabled: boolean; fps: number; maxWidth: number }>({
+    enabled: false,
+    fps: 10,
+    maxWidth: 320,
+  });
   const hostStreamRef = useRef<MediaStream | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const bridgeRef = useRef<RoverWebRtcBridge | null>(null);
@@ -433,14 +447,14 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   const isRemoteDriverLive =
     linkState === "connected" && bridgeRef.current?.getRole() === "driver-client";
+  const hasAnyVideo = hasRemoteVideo || hasFallbackVideo;
 
   // Report Wi-Fi link & remote telemetry up to TopConsoleBar
   useEffect(() => {
-    const label = isRemoteDriverLive
-      ? `Wi-Fi FPV Live${pingMs ? ` · ${pingMs} ms` : ""}`
-      : "";
+    const base = transportMode === "relay" ? "Wi-Fi Relay Live" : "Wi-Fi FPV Live";
+    const label = isRemoteDriverLive ? `${base}${pingMs ? ` · ${pingMs} ms` : ""}` : "";
     cbRef.current.onWifiStatusChange?.(isRemoteDriverLive, label, isRemoteDriverLive ? remoteTelemetry : null);
-  }, [isRemoteDriverLive, pingMs, remoteTelemetry]);
+  }, [isRemoteDriverLive, pingMs, remoteTelemetry, transportMode]);
 
   // Update advertiser metadata whenever Bluetooth or camera readiness changes on Android Host
   useEffect(() => {
@@ -594,26 +608,61 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   // Initialize singleton WebRTC bridge (lives across station tab switches!)
   useEffect(() => {
+    const attachStreamToVideoEl = (stream: MediaStream) => {
+      if (bridgeRef.current?.getTransportMode() === "relay") return;
+      const vid = remoteVideoRef.current;
+      if (!vid) return;
+      if (vid.srcObject !== stream) {
+        vid.srcObject = stream;
+      }
+      void vid.play().catch(() => undefined);
+      if (vid.videoWidth > 16 && vid.videoHeight > 16 && bridgeRef.current?.getTransportMode() === "webrtc") {
+        setHasRemoteVideo(true);
+      }
+    };
+
     const bridge = new RoverWebRtcBridge({
       onStateChange: (st, detail) => {
+        const mode = bridge.getTransportMode();
         setLinkState(st);
+        setTransportMode(mode);
         if (detail) setLinkDetail(detail);
-        if (st !== "connected") {
-          setPingMs(null);
-          if (st === "idle") {
+        if (st === "connected") {
+          if (mode === "relay") {
+            remoteStreamRef.current = null;
+            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
             setHasRemoteVideo(false);
-            setRemoteTelemetry(null);
-            setRemoteBleOk(false);
-            setRemoteVision(null);
-            setRemoteMap(null);
+          } else if (remoteStreamRef.current) {
+            attachStreamToVideoEl(remoteStreamRef.current);
+          }
+        } else {
+          setPingMs(null);
+          hostJpegFallbackRef.current.enabled = false;
+          if (st === "idle" || st === "waiting-peer" || st === "error") {
+            remoteStreamRef.current = null;
+            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+            setHasRemoteVideo(false);
+            setHasFallbackVideo(false);
+            if (st === "idle") {
+              setRemoteTelemetry(null);
+              setRemoteBleOk(false);
+              setRemoteVision(null);
+              setRemoteMap(null);
+            }
           }
         }
       },
+      onDiagnostics: (diag) => {
+        setBridgeDiag(diag);
+        setTransportMode(diag.transport);
+      },
       onRemoteStream: (stream) => {
-        setHasRemoteVideo(true);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
-          void remoteVideoRef.current.play().catch(() => undefined);
+        remoteStreamRef.current = stream;
+        attachStreamToVideoEl(stream);
+        for (const track of stream.getVideoTracks()) {
+          track.onunmute = () => {
+            attachStreamToVideoEl(stream);
+          };
         }
       },
       onFailsafeStop: () => {
@@ -625,6 +674,14 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       onDriverMessage: (msg: DriverToRoverMessage) => {
         if (msg.type === "ping") {
           bridge.sendToDriver({ type: "pong", sentAt: msg.sentAt });
+          return;
+        }
+        if (msg.type === "videoFallback") {
+          hostJpegFallbackRef.current = {
+            enabled: msg.enabled,
+            fps: Math.max(2, Math.min(15, msg.fps ?? 10)),
+            maxWidth: Math.max(160, Math.min(400, msg.maxWidth ?? 320)),
+          };
           return;
         }
         if (msg.type === "stop") {
@@ -746,6 +803,32 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           setPingMs(Math.max(1, Math.round(Date.now() - msg.sentAt)));
           return;
         }
+        if (msg.type === "jpegFrame") {
+          if (fallbackImgBusyRef.current) return;
+          const canvas = fallbackCanvasRef.current;
+          if (!canvas || !msg.dataUrl) return;
+          fallbackImgBusyRef.current = true;
+          const img = new Image();
+          img.onload = () => {
+            fallbackImgBusyRef.current = false;
+            const c = fallbackCanvasRef.current;
+            if (!c) return;
+            if (c.width !== msg.width || c.height !== msg.height) {
+              c.width = msg.width;
+              c.height = msg.height;
+            }
+            const ctx = c.getContext("2d");
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, c.width, c.height);
+              setHasFallbackVideo(true);
+            }
+          };
+          img.onerror = () => {
+            fallbackImgBusyRef.current = false;
+          };
+          img.src = msg.dataUrl;
+          return;
+        }
         if (msg.type === "state") {
           setRemoteTelemetry(msg.telemetry);
           setRemoteBleOk(msg.bleConnected);
@@ -783,6 +866,94 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       bridgeRef.current = null;
     };
   }, [applyHostTorch, handleTapSampleLocal, initParams.autoJoin, initParams.joinCode]);
+
+  // Re-attach live MediaStream whenever switching back to Driver or Host subViews
+  useEffect(() => {
+    if (subView === "driver" && remoteStreamRef.current && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      void remoteVideoRef.current.play().catch(() => undefined);
+    }
+    if (subView === "host" && hostStreamRef.current && hostVideoRef.current) {
+      hostVideoRef.current.srcObject = hostStreamRef.current;
+      void hostVideoRef.current.play().catch(() => undefined);
+    }
+  }, [subView, hostCameraActive, linkState]);
+
+  // Driver: Automatically activate Stage-3A JPEG-over-DataChannel if native WebRTC <video>
+  // stays blank for > 3s (fixes older Android MediaCodec H.264/VP8 quirks), and turn it off
+  // as soon as native WebRTC video frames arrive!
+  useEffect(() => {
+    if (!isRemoteDriverLive || !bridgeRef.current) return;
+    if (transportMode === "relay") {
+      bridgeRef.current.sendToRover({ type: "videoFallback", enabled: true, fps: 7, maxWidth: 288 });
+      return;
+    }
+    if (hasRemoteVideo) {
+      setHasFallbackVideo(false);
+      bridgeRef.current.sendToRover({ type: "videoFallback", enabled: false });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const vid = remoteVideoRef.current;
+      if (vid && vid.videoWidth > 16 && vid.videoHeight > 16) {
+        setHasRemoteVideo(true);
+        return;
+      }
+      if (vid && remoteStreamRef.current) {
+        void vid.play().catch(() => undefined);
+      }
+      bridgeRef.current?.sendToRover({ type: "videoFallback", enabled: true, fps: 12, maxWidth: 320 });
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [hasRemoteVideo, isRemoteDriverLive, transportMode]);
+
+  // Android Host: Stream compact JPEG frames when Driver requests Compatible / Relay video fallback
+  useEffect(() => {
+    if (!hostActive) return;
+    let lastSentAt = 0;
+    const id = window.setInterval(() => {
+      const cfg = hostJpegFallbackRef.current;
+      if (!cfg.enabled) return;
+      const bridge = bridgeRef.current;
+      if (!bridge || bridge.getRole() !== "rover-host" || !bridge.isDataChannelOpen()) return;
+      if (bridge.isSendBackpressured()) return;
+
+      const now = Date.now();
+      const minIntervalMs = Math.round(1000 / cfg.fps);
+      if (now - lastSentAt < minIntervalMs) return;
+
+      const video = hostVideoRef.current;
+      if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return;
+
+      const targetW = Math.min(cfg.maxWidth, video.videoWidth);
+      const targetH = Math.max(90, Math.round((video.videoHeight / video.videoWidth) * targetW));
+      const c = hostJpegCanvasRef.current ?? document.createElement("canvas");
+      if (c.width !== targetW || c.height !== targetH) {
+        c.width = targetW;
+        c.height = targetH;
+      }
+      hostJpegCanvasRef.current = c;
+      const ctx = c.getContext("2d");
+      if (!ctx) return;
+
+      try {
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const quality = bridge.getTransportMode() === "relay" ? 0.46 : 0.58;
+        const dataUrl = c.toDataURL("image/jpeg", quality);
+        lastSentAt = now;
+        bridge.sendToDriver({
+          type: "jpegFrame",
+          dataUrl,
+          width: targetW,
+          height: targetH,
+          ts: now,
+        });
+      } catch {
+        // ignore unready video frame
+      }
+    }, 75);
+    return () => window.clearInterval(id);
+  }, [hostActive]);
 
   // Android Rover Host: 10 Hz Vision + 2D Room Mapping + Co-Pilot Pursuit + Smooth Continuous Auto Explorer!
   useEffect(() => {
@@ -1014,16 +1185,36 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     setHostCameraError(null);
     let stream: MediaStream | null = null;
     if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
+      const candidates: MediaStreamConstraints[] = [
+        {
           video: {
             facingMode: { ideal: "environment" },
             width: { ideal: 640 },
             height: { ideal: 480 },
-            frameRate: { ideal: 24, max: 30 },
+            frameRate: { ideal: 24 },
           },
           audio: false,
-        });
+        },
+        {
+          video: { facingMode: "environment" },
+          audio: false,
+        },
+        {
+          video: true,
+          audio: false,
+        },
+      ];
+      let lastCamErr: unknown = null;
+      for (const constraints of candidates) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          break;
+        } catch (err) {
+          lastCamErr = err;
+        }
+      }
+
+      if (stream) {
         hostStreamRef.current = stream;
         if (hostVideoRef.current) {
           hostVideoRef.current.srcObject = stream;
@@ -1033,9 +1224,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         const track = stream.getVideoTracks()[0];
         const caps = track?.getCapabilities ? (track.getCapabilities() as { torch?: boolean }) : {};
         setHostTorchSupported(Boolean(caps.torch));
-      } catch (err) {
+      } else if (lastCamErr) {
         setHostCameraError(
-          `Camera note: ${err instanceof Error ? err.message : String(err)} — continuing Wi-Fi control link.`
+          `Camera note: ${lastCamErr instanceof Error ? lastCamErr.message : String(lastCamErr)} — continuing Wi-Fi control link.`
         );
       }
     }
@@ -1167,7 +1358,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   }, []);
 
   const handleViewportClick = (ev: React.MouseEvent<HTMLDivElement>) => {
-    if (!hasRemoteVideo) return;
+    if (!hasAnyVideo) return;
     const rect = ev.currentTarget.getBoundingClientRect();
     const normX = Math.max(0.05, Math.min(0.95, (ev.clientX - rect.left) / rect.width));
     const normY = Math.max(0.05, Math.min(0.95, (ev.clientY - rect.top) / rect.height));
@@ -1562,7 +1753,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   // Keep live VR HUD snapshot fresh for 10 Hz WebXR dashboard canvas rendering
   vrHudRef.current = {
-    videoConnected: hasRemoteVideo,
+    videoConnected: hasAnyVideo,
     bleConnected: isRemoteDriverLive ? remoteBleOk : connected,
     assistMode,
     explorerState: activeExplorerBadge,
@@ -1680,6 +1871,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     try {
       await session.start({
         getVideoElement: () => remoteVideoRef.current,
+        getFallbackCanvas: () => fallbackCanvasRef.current,
         getHudState: () =>
           vrHudRef.current ?? {
             videoConnected: false,
@@ -1779,7 +1971,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           <IconWifi size={14} />
           <span>
             {linkState === "connected"
-              ? `Wi-Fi FPV Live${pingMs ? ` · ${pingMs} ms` : ""}`
+              ? `${transportMode === "relay" ? "Wi-Fi Relay Live" : "Wi-Fi FPV Live"}${pingMs ? ` · ${pingMs} ms` : ""}`
               : linkDetail}
           </span>
         </div>
@@ -1874,6 +2066,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               </div>
 
               <div className="action-cluster">
+                {isRemoteDriverLive && transportMode === "relay" && (
+                  <button
+                    type="button"
+                    className="chip-btn"
+                    onClick={() => bridgeRef.current?.retryDirectP2P()}
+                  >
+                    <IconRefresh size={13} />
+                    <span>Retry Direct P2P</span>
+                  </button>
+                )}
                 {(xrVrSupported || isQuestBrowser) && (
                   <button
                     type="button"
@@ -1948,16 +2150,122 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
             >
               <video
                 ref={remoteVideoRef}
-                className={`fpv-media ${hasRemoteVideo ? "" : "is-hidden"}`}
+                className={`fpv-media ${hasRemoteVideo && transportMode !== "relay" ? "" : "is-hidden"}`}
                 playsInline
                 muted
                 autoPlay
+                onLoadedMetadata={(e) => {
+                  const v = e.currentTarget;
+                  void v.play().catch(() => undefined);
+                  if (
+                    v.videoWidth > 16 &&
+                    v.videoHeight > 16 &&
+                    bridgeRef.current?.getTransportMode() === "webrtc"
+                  ) {
+                    setHasRemoteVideo(true);
+                  }
+                }}
+                onPlaying={(e) => {
+                  const v = e.currentTarget;
+                  if (
+                    v.videoWidth > 16 &&
+                    v.videoHeight > 16 &&
+                    bridgeRef.current?.getTransportMode() === "webrtc"
+                  ) {
+                    setHasRemoteVideo(true);
+                  }
+                }}
+                onResize={(e) => {
+                  const v = e.currentTarget;
+                  if (
+                    v.videoWidth > 16 &&
+                    v.videoHeight > 16 &&
+                    bridgeRef.current?.getTransportMode() === "webrtc"
+                  ) {
+                    setHasRemoteVideo(true);
+                  }
+                }}
               />
 
-              {!hasRemoteVideo && (
+              <canvas
+                ref={fallbackCanvasRef}
+                className={`fpv-media ${hasFallbackVideo && (transportMode === "relay" || !hasRemoteVideo) ? "" : "is-hidden"}`}
+                aria-label="Compatible rover camera stream"
+              />
+
+              {!hasAnyVideo &&
+                (linkState === "signaling" ||
+                  linkState === "waiting-peer" ||
+                  linkState === "connecting" ||
+                  linkState === "connected") && (
+                  <div className="fpv-standby fpv-connecting-card" onClick={(e) => e.stopPropagation()}>
+                    <IconWifi size={32} />
+                    <h3>
+                      {linkState === "connected"
+                        ? "Link Live — Waiting for First Camera Frame…"
+                        : "Establishing Live Camera Video…"}
+                    </h3>
+                    <p className="fpv-diag-note">{bridgeDiag?.note || linkDetail}</p>
+                    <div className="fpv-progress-pills">
+                      <span className={`visor-chip ${bridgeDiag?.relay ? "visor-chip-green" : ""}`}>
+                        1. Relay {bridgeDiag?.relay ? `(${bridgeDiag.relay})` : "…"}
+                      </span>
+                      <span className={`visor-chip ${bridgeDiag?.offerReady ? "visor-chip-green" : ""}`}>
+                        2. Offer {bridgeDiag?.offerReady ? "OK" : "…"}
+                      </span>
+                      <span
+                        className={`visor-chip ${
+                          linkState === "connected"
+                            ? "visor-chip-green"
+                            : bridgeDiag?.answerReady
+                              ? "visor-chip-amber"
+                              : ""
+                        }`}
+                      >
+                        3. Video{" "}
+                        {transportMode === "relay"
+                          ? "(Relay)"
+                          : bridgeDiag?.iceConnectionState
+                            ? `(${bridgeDiag.iceConnectionState})`
+                            : "…"}
+                      </span>
+                    </div>
+                    {bridgeDiag && bridgeDiag.offerReady && transportMode !== "relay" && (
+                      <p className="fpv-diag-sub">
+                        Auto-switches to Compatible Relay Video if your Wi-Fi or macOS Local Network
+                        setting blocks direct P2P UDP.
+                      </p>
+                    )}
+                    <div className="action-cluster">
+                      {transportMode !== "relay" && linkState === "connecting" && (
+                        <button
+                          type="button"
+                          id="btn-relay-video-now"
+                          className="keycap keycap-orange keycap-sm"
+                          onClick={() => bridgeRef.current?.activateRelayFallbackNow()}
+                        >
+                          Use Relay Video Now
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="keycap keycap-subtle keycap-sm"
+                        onClick={() => bridgeRef.current?.retryDirectP2P()}
+                      >
+                        <IconRefresh size={13} />
+                        <span>Retry P2P</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+              {!hasAnyVideo && (linkState === "idle" || linkState === "error") && (
                 <div className="fpv-standby">
                   <IconCamera size={34} />
                   <h3>Pair Your Android Phone with Chromebook or Meta Quest (No IP Address Needed)</h3>
+                  {linkState === "error" && (
+                    <p className="fpv-diag-error">{linkDetail}</p>
+                  )}
                   <div className="wifi-steps-grid">
                     <div className="wifi-step-card">
                       <span className="wifi-step-num">1</span>
@@ -1986,7 +2294,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                 </div>
               )}
 
-              {hasRemoteVideo && (
+              {hasAnyVideo && (
                 <FpvOverlaySvg
                   steer={steerVis}
                   frontDistPct={hudDist}
@@ -2018,6 +2326,12 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                         ? "SMART CO-PILOT"
                         : `EXPLORER · ${activeExplorerBadge}`}
                   </span>
+                  {transportMode === "relay" && hasFallbackVideo && (
+                    <span className="visor-chip visor-chip-amber">RELAY VIDEO</span>
+                  )}
+                  {transportMode === "webrtc" && !hasRemoteVideo && hasFallbackVideo && (
+                    <span className="visor-chip visor-chip-cyan">COMPAT VIDEO</span>
+                  )}
                   {hudHeading !== null && (
                     <span className="visor-chip">
                       <IconCompass size={11} /> {compassLabel(hudHeading)}
@@ -2051,7 +2365,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               </div>
 
               {/* Floating touch pad overlay */}
-              {showTouchPad && hasRemoteVideo && (
+              {showTouchPad && hasAnyVideo && (
                 <div
                   ref={touchPadRef}
                   className="fpv-floating-stick"
@@ -2507,7 +2821,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
             </div>
 
             <div className="viewfinder-box">
-              <video ref={hostVideoRef} className="viewfinder-video" muted playsInline />
+              <video
+                ref={hostVideoRef}
+                className="viewfinder-video"
+                muted
+                playsInline
+                autoPlay
+                onLoadedMetadata={(e) => {
+                  void e.currentTarget.play().catch(() => undefined);
+                }}
+              />
               {!hostCameraActive && (
                 <div className="viewfinder-standby">
                   <IconCamera size={28} />
