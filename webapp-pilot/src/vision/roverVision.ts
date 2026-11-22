@@ -129,8 +129,8 @@ export function analyzeFloorCorridors(
     }
   }
   const floorNoise = count > 0 ? varSum / count : 12;
-  const colorDistThresh = clamp(32 + floorNoise * 1.8, 34, 72);
-  const edgeThresh = clamp(28 + floorNoise * 1.4, 28, 62);
+  const colorDistThresh = clamp(40 + floorNoise * 2.0, 42, 82);
+  const edgeThresh = clamp(32 + floorNoise * 1.5, 34, 70);
 
   // 2. Scan upward from yBottom (0.90h) to yHorizon (0.44h) in 5 horizontal sectors
   const yBottom = Math.floor(height * 0.9);
@@ -156,12 +156,12 @@ export function analyzeFloorCorridors(
         const g = rgba[idx + 1];
         const b = rgba[idx + 2];
 
-        // Color deviation from learned floor patch (tolerant to mild brightness gradient)
+        // Color deviation from learned floor patch (tolerant to mild indoor lighting gradients)
         const rgbDiff = (Math.abs(r - floorR) + Math.abs(g - floorG) + Math.abs(b - floorB)) / 3;
         const pxHsv = rgbToHsv(r, g, b);
         const hueBarrier =
-          pxHsv.s > 0.28 && floorHsv.s > 0.12 && hueDiffDeg(pxHsv.h, floorHsv.h) > 36;
-        const satBarrier = Math.abs(pxHsv.s - floorHsv.s) > 0.34;
+          pxHsv.s > 0.3 && floorHsv.s > 0.14 && hueDiffDeg(pxHsv.h, floorHsv.h) > 38;
+        const satBarrier = Math.abs(pxHsv.s - floorHsv.s) > 0.36;
 
         // Vertical gradient (horizontal edge like baseboard / chair leg / obstacle bottom)
         const aboveIdx = (Math.max(0, y - 1) * width + x) * 4;
@@ -175,9 +175,9 @@ export function analyzeFloorCorridors(
         }
       }
 
-      if (blockedCols / cols > 0.42) {
+      if (blockedCols / cols > 0.46) {
         consecutiveBlocked++;
-        if (consecutiveBlocked >= 2) break;
+        if (consecutiveBlocked >= 3) break;
       } else {
         consecutiveBlocked = 0;
         freeRows = yBottom - y + 1;

@@ -2974,6 +2974,7 @@ a:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 16px 18px;
   border-radius: var(--radius-md);
@@ -2986,12 +2987,13 @@ a:focus-visible {
 }
 
 .room-code-display {
-  font-size: 2.1rem;
+  font-size: 2rem;
   font-weight: 800;
   letter-spacing: 0.14em;
   color: #38bdf8;
   line-height: 1.15;
   margin-top: 4px;
+  white-space: nowrap;
 }
 
 .host-checklist {
@@ -3211,3 +3213,132 @@ a:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+/* ===========================
+   SAME-WI-FI AUTO-DISCOVERY & 2-STEP PAIRING GUIDE
+   =========================== */
+
+.station-stack[hidden] {
+  display: none !important;
+}
+
+.wifi-discovery-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 15px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1.5px solid var(--border-hairline);
+}
+
+.wifi-discovery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wifi-discovery-sub {
+  margin: 3px 0 0;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.discovered-tank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.discovered-tank-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--green-soft);
+  border: 1.5px solid var(--green);
+}
+
+.discovered-tank-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.discovered-tank-card strong {
+  font-size: 0.94rem;
+  color: var(--ink-primary);
+}
+
+.fpv-standby {
+  padding: 50px 24px 66px;
+  overflow-y: auto;
+}
+
+.wifi-steps-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  margin-top: 6px;
+  text-align: left;
+}
+
+.wifi-step-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.wifi-step-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--orange);
+  color: #ffffff;
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wifi-step-card > div > strong {
+  display: block;
+  font-size: 0.86rem;
+  color: #ffffff;
+  margin-bottom: 4px;
+}
+
+.wifi-step-card p {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.5;
+  color: var(--ink-visor-muted);
+}
+
+.wifi-step-card p strong {
+  display: inline;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .wifi-steps-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

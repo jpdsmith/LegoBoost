@@ -13,12 +13,16 @@ import {
   buildMqttConnectPacket,
   buildMqttPublishPacket,
   buildMqttSubscribePacket,
+  chunkSignalingPayload,
   decodeMqttPackets,
+  decodeMqttStream,
   encodeRemainingLength,
   generateRoomCode,
   normalizeRoomCode,
+  SignalingChunkReassembler,
 } from "./rtc/mqttSignaling";
 import { parseBridgeMessage, DriverToRoverMessage } from "./rtc/roverBridge";
+import { computeHouseholdTopic } from "./rtc/wifiDiscovery";
 
 function makePad(overrides: Partial<GamepadLike> = {}): GamepadLike {
   const buttons = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
@@ -84,7 +88,7 @@ describe("Phase 1 — XboxControllerReader & driving math", () => {
   });
 });
 
-describe("Phase 1 — Zero-Dependency MQTT-over-WSS Signaling Codec", () => {
+describe("Phase 1 — Dual-Relay Port-443 + MQTT Signaling & Auto-Discovery", () => {
   it("encodes variable-length remaining lengths per MQTT 3.1.1 spec", () => {
     expect(encodeRemainingLength(0)).toEqual([0]);
     expect(encodeRemainingLength(127)).toEqual([127]);
@@ -92,14 +96,14 @@ describe("Phase 1 — Zero-Dependency MQTT-over-WSS Signaling Codec", () => {
     expect(encodeRemainingLength(16383)).toEqual([0xff, 0x7f]);
   });
 
-  it("round-trips PUBLISH packets cleanly alongside CONNACK/SUBACK frames", () => {
+  it("round-trips PUBLISH packets cleanly across fragmented WebSocket frames", () => {
     const conn = buildMqttConnectPacket("vp_test1");
     expect(conn[0]).toBe(0x10);
-    const sub = buildMqttSubscribePacket(1, "vernie-pilot/v1/room/K4M9");
+    const sub = buildMqttSubscribePacket(1, "vernie-pilot/v2/room-K4M9");
     expect(sub[0]).toBe(0x82);
 
     const pub = buildMqttPublishPacket(
-      "vernie-pilot/v1/room/K4M9",
+      "vernie-pilot/v2/room-K4M9",
       JSON.stringify({ from: "p1", kind: "hello" })
     );
     const connack = new Uint8Array([0x20, 0x02, 0x00, 0x00]);
@@ -107,16 +111,60 @@ describe("Phase 1 — Zero-Dependency MQTT-over-WSS Signaling Codec", () => {
     combined.set(connack, 0);
     combined.set(pub, connack.length);
 
-    const decoded = decodeMqttPackets(combined);
-    expect(decoded).toHaveLength(2);
-    expect(decoded[0]).toEqual({ type: "connack", code: 0 });
-    expect(decoded[1]).toEqual({
-      type: "publish",
-      msg: {
-        topic: "vernie-pilot/v1/room/K4M9",
-        payload: '{"from":"p1","kind":"hello"}',
+    // Split mid-packet to verify stream reassembly!
+    const splitAt = connack.length + 10;
+    const part1 = decodeMqttStream(combined.slice(0, splitAt));
+    expect(part1.packets).toEqual([{ type: "connack", code: 0 }]);
+    expect(part1.remainder.length).toBe(10);
+
+    const merged = new Uint8Array(part1.remainder.length + (combined.length - splitAt));
+    merged.set(part1.remainder, 0);
+    merged.set(combined.slice(splitAt), part1.remainder.length);
+    const part2 = decodeMqttStream(merged);
+    expect(part2.remainder.length).toBe(0);
+    expect(part2.packets).toEqual([
+      {
+        type: "publish",
+        msg: {
+          topic: "vernie-pilot/v2/room-K4M9",
+          payload: '{"from":"p1","kind":"hello"}',
+        },
       },
+    ]);
+
+    expect(decodeMqttPackets(combined)).toHaveLength(2);
+  });
+
+  it("chunks and reassembles large 5 KB WebRTC SDP offers cleanly for port-443 ntfy.sh", () => {
+    const largeSdp = JSON.stringify({
+      from: "p_host",
+      kind: "offer",
+      sdp: { type: "offer", sdp: "v=0\r\n" + "a=candidate:foo ".repeat(380) },
     });
+    expect(largeSdp.length).toBeGreaterThan(5000);
+
+    const chunks = chunkSignalingPayload(largeSdp, 2400);
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThan(2600);
+    }
+
+    const reassembler = new SignalingChunkReassembler();
+    let reassembled: string | null = null;
+    for (const c of chunks) {
+      reassembled = reassembler.push(c);
+    }
+    expect(reassembled).toBe(largeSdp);
+  });
+
+  it("hashes shared public IPv4 into deterministic private Same-Wi-Fi discovery topic", async () => {
+    const t1 = await computeHouseholdTopic("203.0.113.42");
+    const t2 = await computeHouseholdTopic("203.0.113.42");
+    const tOther = await computeHouseholdTopic("198.51.100.7");
+    expect(t1).toBe(t2);
+    expect(t1).not.toBe(tOther);
+    expect(t1).toMatch(/^lan-[0-9a-f]{16}$/);
+    expect(t1).not.toContain("203");
   });
 
   it("generates and normalizes human-friendly 4-character Room Codes", () => {

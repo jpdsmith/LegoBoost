@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// Autonomous Vision Explorer Brain ("Mars Rover Explorer") for LEGO BOOST Tank/Car.
-// Combines:
-//   - 5-sector camera free-floor clearance steering (avoids obstacles meters ahead!)
-//   - 2D occupancy grid frontier curiosity bias (explores new areas of the room)
-//   - Optical-flow + wheel-encoder stuck detection & automatic unstick recovery
-//   - Curious object discovery pauses (snaps Discovery Log thumbnails & chirps)
-//   - Mission objectives: Explore Room, Find Person, Find Objects, Return to Start
+// Smooth Continuous Autonomous Vision Explorer for LEGO BOOST Tank/Car.
+// Designed for fluid, car-like forward cruising with ZERO unnecessary stopping:
+//   - Curves smoothly around obstacles using 5-sector camera floor clearance + early bumper avoidance
+//   - Applies turn-direction hysteresis & exponential motor smoothing (no stop-start jitter!)
+//   - Logs curious object discoveries ON THE FLY without halting forward motion
+//   - Only reverses in a curved arc when genuinely dead-ended, bumped, or inches from impact
+//   - Recovers automatically if snagged on a rug/cord (visual optical flow + encoder stall)
 
 import { DetectedObjectBox, ExplorerMission } from "../rtc/roverBridge";
 import { mixXboxToTank } from "../input/xboxController";
@@ -15,7 +15,6 @@ export type ExplorerFsmState =
   | "CRUISING"
   | "AVOIDING"
   | "UNSTICKING"
-  | "INSPECTING"
   | "RETURNING_HOME"
   | "MISSION_COMPLETE"
   | "PAUSED";
@@ -44,9 +43,9 @@ export interface ExplorerTickOutput {
   steer: number;
   throttle: number;
   statusNote: string;
-  /** Emitted once when pausing to log a new discovery */
+  /** Emitted on the fly when spotting an interesting object (no stopping!) */
   discovery?: { label: string; confidence: number };
-  /** Optional expressive robot synth SFX preset (e.g. 2=Happy Chirp, 3=Curious Beep, 7=Victory) */
+  /** Optional expressive robot synth SFX preset ONLY when stopped (never interrupts rolling drive motors!) */
   synthSfx?: number;
   recoveries: number;
 }
@@ -72,29 +71,76 @@ export class IntelligentExplorer {
   private state: ExplorerFsmState = "CRUISING";
   private stateUntilMs = 0;
   private avoidDir: -1 | 1 = 1;
+  private turnCommitDir: -1 | 0 | 1 = 0;
+  private turnCommitUntilMs = 0;
+  private deadEndAccumMs = 0;
   private stuckAccumMs = 0;
   private lastTickMs = 0;
   private lastEncSum: number | null = null;
   private recoveries = 0;
   private seenCooldowns = new Map<string, number>();
   private lastDiscoveryMs = -Infinity;
-  private inspectingLabel: string | null = null;
+  private smoothedSteer = 0;
+  private smoothedThrottle = 0.45;
+  private hasStepped = false;
 
   reset(): void {
     this.state = "CRUISING";
     this.stateUntilMs = 0;
     this.avoidDir = 1;
+    this.turnCommitDir = 0;
+    this.turnCommitUntilMs = 0;
+    this.deadEndAccumMs = 0;
     this.stuckAccumMs = 0;
     this.lastTickMs = 0;
     this.lastEncSum = null;
     this.recoveries = 0;
     this.seenCooldowns.clear();
     this.lastDiscoveryMs = -Infinity;
-    this.inspectingLabel = null;
+    this.smoothedSteer = 0;
+    this.smoothedThrottle = 0.45;
+    this.hasStepped = false;
   }
 
   getRecoveries(): number {
     return this.recoveries;
+  }
+
+  private smoothOutput(targetSteer: number, targetThrottle: number, fast = false): {
+    steer: number;
+    throttle: number;
+  } {
+    if (!this.hasStepped) {
+      this.hasStepped = true;
+      this.smoothedSteer = targetSteer;
+      this.smoothedThrottle = targetThrottle;
+    } else {
+      const aSteer = fast ? 0.55 : 0.34;
+      const aThrottle = fast ? 0.55 : 0.3;
+      this.smoothedSteer += (targetSteer - this.smoothedSteer) * aSteer;
+      this.smoothedThrottle += (targetThrottle - this.smoothedThrottle) * aThrottle;
+    }
+    return {
+      steer: clamp(this.smoothedSteer, -0.92, 0.92),
+      throttle: clamp(this.smoothedThrottle, -0.75, 0.85),
+    };
+  }
+
+  private pickClearSide(
+    leftClear: number,
+    rightClear: number,
+    frontier: number,
+    nowMs: number
+  ): -1 | 1 {
+    // Respect recent turn direction commitment unless the opposite side is decisively clearer
+    const commitBias =
+      nowMs < this.turnCommitUntilMs && this.turnCommitDir !== 0 ? this.turnCommitDir * 0.14 : 0;
+    const rightScore = rightClear + frontier * 0.2 + commitBias;
+    const leftScore = leftClear - frontier * 0.2 - commitBias;
+    const chosen: -1 | 1 = rightScore >= leftScore ? 1 : -1;
+    this.turnCommitDir = chosen;
+    this.turnCommitUntilMs = nowMs + 750;
+    return chosen;
   }
 
   step(input: ExplorerTickInput): ExplorerTickOutput {
@@ -105,6 +151,8 @@ export class IntelligentExplorer {
     // 1. Immediate hardware safety lockouts
     if (input.safeMode || input.pickedUp) {
       this.stuckAccumMs = 0;
+      this.deadEndAccumMs = 0;
+      this.hasStepped = false;
       return {
         state: "PAUSED",
         left: 0,
@@ -118,10 +166,12 @@ export class IntelligentExplorer {
       };
     }
 
-    const cap = clamp(input.speedCap, 25, 75); // Smooth autonomous speed cap
-    const leftClear = (input.corridors[0] + input.corridors[1]) / 2;
+    const cap = clamp(input.speedCap, 25, 80);
+    const leftClear = input.corridors[0] * 0.45 + input.corridors[1] * 0.55;
     const centerClear = input.corridors[2];
-    const rightClear = (input.corridors[3] + input.corridors[4]) / 2;
+    const rightClear = input.corridors[4] * 0.45 + input.corridors[3] * 0.55;
+    const maxSideClear = Math.max(leftClear, rightClear);
+    const frontierBias = input.mapper.getFrontierBias();
 
     // 2. Check encoder delta & visual optical flow for snag/stuck detection while cruising forward
     const encSum = Math.abs(input.encA) + Math.abs(input.encB);
@@ -129,89 +179,64 @@ export class IntelligentExplorer {
     this.lastEncSum = encSum;
 
     if (this.state === "CRUISING" || this.state === "RETURNING_HOME") {
-      const visuallyStalled = Math.abs(input.flowForward) < 0.08 && encDelta < 3;
+      const visuallyStalled = Math.abs(input.flowForward) < 0.07 && encDelta < 3;
       if (visuallyStalled) {
         this.stuckAccumMs += dtMs;
       } else {
         this.stuckAccumMs = Math.max(0, this.stuckAccumMs - dtMs * 1.5);
       }
 
-      if (this.stuckAccumMs >= 1600) {
+      if (this.stuckAccumMs >= 2100) {
         this.stuckAccumMs = 0;
+        this.deadEndAccumMs = 0;
         this.recoveries += 1;
-        this.avoidDir = rightClear >= leftClear ? 1 : -1;
+        this.avoidDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
         this.state = "UNSTICKING";
-        this.stateUntilMs = now + 1500;
+        this.stateUntilMs = now + 1200;
+        this.smoothedSteer = -this.avoidDir * 0.35;
+        this.smoothedThrottle = -0.62;
+        const m = mixXboxToTank(this.smoothedSteer, this.smoothedThrottle, cap);
         return {
           state: "UNSTICKING",
-          left: -Math.round(cap * 0.7),
-          right: -Math.round(cap * 0.7),
-          steer: 0,
-          throttle: -0.7,
-          statusNote: `Rug/obstacle snag detected — running Unstick Recovery #${this.recoveries}`,
-          synthSfx: 3,
+          left: m.left,
+          right: m.right,
+          steer: this.smoothedSteer,
+          throttle: this.smoothedThrottle,
+          statusNote: `Snag detected — smooth Unstick Recovery #${this.recoveries}`,
           recoveries: this.recoveries,
         };
       }
     }
 
-    // 3. Handle active UNSTICKING maneuver (reverse 650 ms, then pivot 850 ms)
+    // 3. Handle active UNSTICKING maneuver (550 ms curved reverse -> 650 ms forward escape arc!)
     if (this.state === "UNSTICKING") {
       const rem = this.stateUntilMs - now;
-      if (rem > 850) {
-        const m = mixXboxToTank(0, -0.7, cap);
+      if (rem > 650) {
+        const s = this.smoothOutput(-this.avoidDir * 0.38, -0.62, true);
+        const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "UNSTICKING",
           left: m.left,
           right: m.right,
-          steer: 0,
-          throttle: -0.7,
-          statusNote: `Unstick Recovery #${this.recoveries} — backing clear…`,
+          steer: s.steer,
+          throttle: s.throttle,
+          statusNote: `Unstick Recovery #${this.recoveries} — backing clear in an arc…`,
           recoveries: this.recoveries,
         };
       }
       if (rem > 0) {
-        const m = mixXboxToTank(this.avoidDir * 0.85, 0, cap);
+        const s = this.smoothOutput(this.avoidDir * 0.68, 0.48, true);
+        const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "UNSTICKING",
           left: m.left,
           right: m.right,
-          steer: this.avoidDir * 0.85,
-          throttle: 0,
-          statusNote: `Unstick Recovery #${this.recoveries} — pivoting toward open floor…`,
+          steer: s.steer,
+          throttle: s.throttle,
+          statusNote: `Unstick Recovery #${this.recoveries} — curving forward onto open floor…`,
           recoveries: this.recoveries,
         };
       }
-      this.state = input.mission === "return-home" ? "RETURNING_HOME" : "CRUISING";
-    }
-
-    // 4. Handle INSPECTING discovery pause
-    if (this.state === "INSPECTING") {
-      if (now < this.stateUntilMs) {
-        return {
-          state: "INSPECTING",
-          left: 0,
-          right: 0,
-          steer: 0,
-          throttle: 0,
-          statusNote: `Inspecting discovery: ${this.inspectingLabel ?? "object"}!`,
-          recoveries: this.recoveries,
-        };
-      }
-      if (input.mission === "find-person" && this.inspectingLabel === "person") {
-        this.state = "MISSION_COMPLETE";
-        return {
-          state: "MISSION_COMPLETE",
-          left: 0,
-          right: 0,
-          steer: 0,
-          throttle: 0,
-          statusNote: "Mission complete — found a person!",
-          synthSfx: 7,
-          recoveries: this.recoveries,
-        };
-      }
-      this.inspectingLabel = null;
       this.state = input.mission === "return-home" ? "RETURNING_HOME" : "CRUISING";
     }
 
@@ -234,7 +259,8 @@ export class IntelligentExplorer {
       }
     }
 
-    // 5. Check for well-framed new object discoveries (outside return-home, spaced by >= 2.8 s)
+    // 4. On-the-fly object discovery logging (NO STOPPING while exploring! Only stop when Find Person completes!)
+    let discoveryOut: { label: string; confidence: number } | undefined;
     if (
       input.mission !== "return-home" &&
       this.state === "CRUISING" &&
@@ -254,64 +280,80 @@ export class IntelligentExplorer {
       if (candidate) {
         this.seenCooldowns.set(candidate.label, now);
         this.lastDiscoveryMs = now;
-        this.inspectingLabel = candidate.label;
-        this.state = "INSPECTING";
-        this.stateUntilMs = now + 1300;
-        return {
-          state: "INSPECTING",
-          left: 0,
-          right: 0,
-          steer: 0,
-          throttle: 0,
-          statusNote: `Spotted ${candidate.label}! Logging discovery…`,
-          discovery: { label: candidate.label, confidence: candidate.score },
-          synthSfx: candidate.label === "person" ? 2 : 3,
-          recoveries: this.recoveries,
-        };
+        discoveryOut = { label: candidate.label, confidence: candidate.score };
+
+        // Only halt for the dedicated "Find Person" mission when a person is found!
+        if (input.mission === "find-person" && candidate.label === "person") {
+          this.state = "MISSION_COMPLETE";
+          return {
+            state: "MISSION_COMPLETE",
+            left: 0,
+            right: 0,
+            steer: 0,
+            throttle: 0,
+            statusNote: "Mission complete — found a person!",
+            discovery: discoveryOut,
+            synthSfx: 7,
+            recoveries: this.recoveries,
+          };
+        }
       }
     }
 
-    // 6. Proactive obstacle avoidance (bump, bumper <= 34%, or center floor clearance < 0.30)
-    const obstacleNow = input.bump || input.frontDistancePct <= 34 || centerClear < 0.3;
-    if (obstacleNow && this.state !== "AVOIDING") {
+    // 5. True emergency dead-end / impact check (debounced so noisy frames NEVER cause false stops!)
+    const immediateImpact = input.bump || input.frontDistancePct <= 18;
+    const allLanesDeadEnd = centerClear < 0.14 && maxSideClear < 0.24;
+    if (allLanesDeadEnd) {
+      this.deadEndAccumMs += dtMs;
+    } else {
+      this.deadEndAccumMs = Math.max(0, this.deadEndAccumMs - dtMs * 2);
+    }
+
+    const mustReverse = immediateImpact || this.deadEndAccumMs >= 320;
+    if (mustReverse && this.state !== "AVOIDING") {
       this.state = "AVOIDING";
-      this.stateUntilMs = now + 900;
-      const frontier = input.mapper.getFrontierBias();
-      const rightScore = rightClear + frontier * 0.25;
-      const leftScore = leftClear - frontier * 0.25;
-      this.avoidDir = rightScore >= leftScore ? 1 : -1;
+      this.deadEndAccumMs = 0;
+      this.avoidDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
+      this.stateUntilMs = now + 780;
     }
 
     if (this.state === "AVOIDING") {
-      const tooClose = input.frontDistancePct <= 24 || input.bump;
-      if (tooClose) {
-        const m = mixXboxToTank(-this.avoidDir * 0.2, -0.65, cap);
+      const rem = this.stateUntilMs - now;
+      const stillTooClose = input.bump || input.frontDistancePct <= 24;
+      // Phase A: brief smooth reverse-arc ONLY while inches from impact or in first 360ms of dead-end
+      if (stillTooClose || rem > 420) {
+        const s = this.smoothOutput(-this.avoidDir * 0.45, -0.56, true);
+        const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "AVOIDING",
           left: m.left,
           right: m.right,
-          steer: -this.avoidDir * 0.2,
-          throttle: -0.65,
-          statusNote: "Too close — backing away before turning",
+          steer: s.steer,
+          throttle: s.throttle,
+          statusNote: "Dead-end / bumper close — reversing smoothly in an arc",
+          discovery: discoveryOut,
           recoveries: this.recoveries,
         };
       }
-      if (now < this.stateUntilMs || centerClear < 0.5) {
-        const m = mixXboxToTank(this.avoidDir * 0.8, 0, cap);
+      // Phase B: immediately roll forward again while curving cleanly toward open floor!
+      if (rem > 0 && centerClear < 0.35) {
+        const s = this.smoothOutput(this.avoidDir * 0.65, 0.46, true);
+        const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "AVOIDING",
           left: m.left,
           right: m.right,
-          steer: this.avoidDir * 0.8,
-          throttle: 0,
-          statusNote: `Steering ${this.avoidDir > 0 ? "right" : "left"} toward open corridor`,
+          steer: s.steer,
+          throttle: s.throttle,
+          statusNote: `Carving ${this.avoidDir > 0 ? "right" : "left"} around obstacle`,
+          discovery: discoveryOut,
           recoveries: this.recoveries,
         };
       }
       this.state = input.mission === "return-home" ? "RETURNING_HOME" : "CRUISING";
     }
 
-    // 7. Return-to-Start Navigation (obstacle-aware!)
+    // 6. Return-to-Start Navigation (continuous obstacle-curving forward drive!)
     if (input.mission === "return-home") {
       this.state = "RETURNING_HOME";
       const home = input.mapper.getReturnHomeGuidance();
@@ -328,40 +370,77 @@ export class IntelligentExplorer {
           recoveries: this.recoveries,
         };
       }
-      const homeSteer = clamp(home.turnErrorDeg / 50, -0.85, 0.85);
-      const blendedSteer = clamp(homeSteer * 0.65 + input.bestSteer * 0.35, -0.9, 0.9);
-      const throttle = Math.abs(home.turnErrorDeg) > 65 ? 0.15 : 0.65;
-      const m = mixXboxToTank(blendedSteer, throttle, cap);
+      const homeSteer = clamp(home.turnErrorDeg / 50, -0.82, 0.82);
+      const obstaclePull =
+        centerClear < 0.5 || input.frontDistancePct <= 48
+          ? this.pickClearSide(leftClear, rightClear, 0, now) * 0.55
+          : 0;
+      const targetSteer = clamp(homeSteer * 0.55 + input.bestSteer * 0.3 + obstaclePull * 0.45, -0.85, 0.85);
+      // Keep moving forward continuously even while curving back toward home
+      const targetThrottle = Math.abs(home.turnErrorDeg) > 95 ? 0.36 : clamp(0.45 + centerClear * 0.3, 0.42, 0.74);
+      const s = this.smoothOutput(targetSteer, targetThrottle);
+      const m = mixXboxToTank(s.steer, s.throttle, cap);
       return {
         state: "RETURNING_HOME",
         left: m.left,
         right: m.right,
-        steer: blendedSteer,
-        throttle,
+        steer: s.steer,
+        throttle: s.throttle,
         statusNote: `Returning home · ${(home.distCm / 100).toFixed(1)} m away`,
         recoveries: this.recoveries,
       };
     }
 
-    // 8. Normal Curious Cruising: blend 5-sector vision clearance (68%) + unexplored frontier (32%)
+    // 7. Continuous Smooth Forward Cruising — curves gracefully around obstacles WITHOUT stopping!
     this.state = "CRUISING";
-    const frontierBias = input.mapper.getFrontierBias();
-    const cruiseSteer = clamp(input.bestSteer * 0.68 + frontierBias * 0.32, -0.78, 0.78);
-    const cruiseThrottle = clamp(0.45 + centerClear * 0.35, 0.42, 0.78);
-    const m = mixXboxToTank(cruiseSteer, cruiseThrottle, cap);
+
+    // Early proportional avoidance repulsion when an obstacle appears ahead (before ever needing to stop!)
+    const visionPressure = clamp((0.62 - centerClear) / 0.48, 0, 1);
+    const bumperPressure =
+      input.frontDistancePct <= 58 ? clamp((58 - input.frontDistancePct) / 38, 0, 1) : 0;
+    const avoidPressure = Math.max(visionPressure, bumperPressure);
+
+    let targetSteer = input.bestSteer * 0.65 + frontierBias * 0.25;
+    if (avoidPressure > 0.12) {
+      const clearDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
+      // Smoothly increase curve strength as obstacle approaches while keeping forward motion fluid
+      targetSteer = clamp(
+        targetSteer * (1 - avoidPressure * 0.5) + clearDir * (0.35 + avoidPressure * 0.5),
+        -0.84,
+        0.84
+      );
+    } else {
+      targetSteer = clamp(targetSteer, -0.72, 0.72);
+    }
+
+    // Continuous positive forward throttle floor (never stops dead while curving!)
+    const targetThrottle = clamp(
+      0.46 + centerClear * 0.32 - avoidPressure * 0.14,
+      0.42,
+      0.78
+    );
+
+    const s = this.smoothOutput(targetSteer, targetThrottle);
+    const m = mixXboxToTank(s.steer, s.throttle, cap);
+
+    const note = discoveryOut
+      ? `Spotted ${discoveryOut.label} — logged on the fly!`
+      : avoidPressure > 0.3
+        ? `Curving ${s.steer >= 0 ? "right" : "left"} smoothly around obstacle`
+        : input.mission === "find-person"
+          ? "Cruising smoothly · Searching for a person…"
+          : input.mission === "find-object"
+            ? "Cruising smoothly · Logging landmarks on the fly…"
+            : "Cruising open floor · Mapping room smoothly";
 
     return {
       state: "CRUISING",
       left: m.left,
       right: m.right,
-      steer: cruiseSteer,
-      throttle: cruiseThrottle,
-      statusNote:
-        input.mission === "find-person"
-          ? "Exploring room · Searching for a person…"
-          : input.mission === "find-object"
-            ? "Exploring room · Hunting for interesting objects…"
-            : "Exploring open floor · Mapping new room areas",
+      steer: s.steer,
+      throttle: s.throttle,
+      statusNote: note,
+      discovery: discoveryOut,
       recoveries: this.recoveries,
     };
   }

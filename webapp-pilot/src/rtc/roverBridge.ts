@@ -6,7 +6,7 @@
 // Supports both 4-character Room Code signaling (over WSS MQTT) AND 100% offline manual Offer/Answer copy-paste!
 
 import { TelemetryFrame } from "@core/ble/protocol";
-import { MqttSignalingChannel, normalizeRoomCode } from "./mqttSignaling";
+import { MultiSignalingChannel, normalizeRoomCode } from "./mqttSignaling";
 
 export type BridgeRole = "idle" | "rover-host" | "driver-client";
 export type BridgeLinkState = "idle" | "signaling" | "waiting-peer" | "connecting" | "connected" | "error";
@@ -125,6 +125,7 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
   ],
 };
 
@@ -139,7 +140,7 @@ export function parseBridgeMessage<T>(raw: string): T | null {
 export class RoverWebRtcBridge {
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
-  private sig: MqttSignalingChannel | null = null;
+  private sig: MultiSignalingChannel | null = null;
   private readonly peerId = `p_${Math.random().toString(36).slice(2, 9)}`;
   private remotePeerId: string | null = null;
   private lastOfferAt = 0;
@@ -178,16 +179,17 @@ export class RoverWebRtcBridge {
     if (!code) throw new Error("Enter a valid Room Code");
     this.role = "rover-host";
     this.localStream = cameraStream;
-    this.callbacks.onStateChange("signaling", `Connecting room ${code}…`);
+    this.callbacks.onStateChange("signaling", `Opening Wi-Fi room ${code}…`);
 
-    const topic = `vernie-pilot/v1/room/${code}`;
-    this.sig = new MqttSignalingChannel(topic, (payload) => {
+    const topic = `room-${code}`;
+    this.sig = new MultiSignalingChannel(topic, (payload) => {
       void this.handleSignal(payload);
     });
 
     try {
       await this.sig.connect();
-      this.callbacks.onStateChange("waiting-peer", `Waiting for Driver on code ${code}`);
+      const relays = this.sig.getActiveRelays().join(" + ") || "Relay";
+      this.callbacks.onStateChange("waiting-peer", `Ready on code ${code} (${relays})`);
       // Periodically announce readiness while waiting (never interrupt active ICE negotiation)
       this.publishSignal({ from: this.peerId, kind: "hello" });
       this.helloTimer = setInterval(() => {
@@ -197,7 +199,7 @@ export class RoverWebRtcBridge {
         if (!busy) {
           this.publishSignal({ from: this.peerId, kind: "hello" });
         }
-      }, 3000);
+      }, 2500);
 
       // Dead-man failsafe: if driver was driving and Wi-Fi stalls > 500 ms, stop motors immediately!
       this.linkWatchdog = setInterval(() => {
@@ -209,7 +211,7 @@ export class RoverWebRtcBridge {
     } catch (err) {
       this.callbacks.onStateChange(
         "error",
-        err instanceof Error ? err.message : "Signaling relay unavailable"
+        err instanceof Error ? err.message : "Wi-Fi pairing relay unavailable"
       );
       throw err;
     }
@@ -221,18 +223,19 @@ export class RoverWebRtcBridge {
   async startDriver(roomCode: string): Promise<void> {
     this.stop();
     const code = normalizeRoomCode(roomCode);
-    if (!code) throw new Error("Enter the 4-character Room Code shown on the Rover phone");
+    if (!code) throw new Error("Enter the 4-character Room Code shown on the Android phone");
     this.role = "driver-client";
-    this.callbacks.onStateChange("signaling", `Joining room ${code}…`);
+    this.callbacks.onStateChange("signaling", `Connecting to room ${code}…`);
 
-    const topic = `vernie-pilot/v1/room/${code}`;
-    this.sig = new MqttSignalingChannel(topic, (payload) => {
+    const topic = `room-${code}`;
+    this.sig = new MultiSignalingChannel(topic, (payload) => {
       void this.handleSignal(payload);
     });
 
     try {
       await this.sig.connect();
-      this.callbacks.onStateChange("waiting-peer", `Looking for Tank on code ${code}…`);
+      const relays = this.sig.getActiveRelays().join(" + ") || "Relay";
+      this.callbacks.onStateChange("waiting-peer", `Calling Tank ${code} (${relays})…`);
       this.publishSignal({ from: this.peerId, kind: "hello" });
       this.helloTimer = setInterval(() => {
         const busy =
@@ -241,11 +244,11 @@ export class RoverWebRtcBridge {
         if (!busy) {
           this.publishSignal({ from: this.peerId, kind: "hello" });
         }
-      }, 3000);
+      }, 2500);
     } catch (err) {
       this.callbacks.onStateChange(
         "error",
-        err instanceof Error ? err.message : "Signaling relay unavailable"
+        err instanceof Error ? err.message : "Wi-Fi pairing relay unavailable"
       );
       throw err;
     }

@@ -24,7 +24,6 @@ interface FirmwareManifest {
 export interface SetupStationProps {
   bleSupported: boolean;
   connectionState: ConnectionState;
-  demoMode: boolean;
   telemetry: TelemetryFrame | null;
   rxHz: number;
   onRebootToBootloader: () => Promise<void>;
@@ -51,7 +50,6 @@ const FLASH_STAGES: Array<{ id: FlashProgress["stage"]; label: string }> = [
 export const SetupStation: React.FC<SetupStationProps> = ({
   bleSupported,
   connectionState,
-  demoMode,
   telemetry,
   rxHz,
   onRebootToBootloader,
@@ -378,7 +376,7 @@ export const SetupStation: React.FC<SetupStationProps> = ({
             <div>
               <h2>Live Hardware Inspector</h2>
               <p className="panel-sub">
-                Raw sensor &amp; encoder stream ({demoMode ? "Demo Simulation" : `${rxHz.toFixed(1)} Hz BLE`})
+                Raw sensor &amp; encoder stream ({rxHz.toFixed(1)} Hz BLE)
               </p>
             </div>
             <button

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // @vitest-environment jsdom
-// Comprehensive Component & Simulator Tests for Vernie Pilot PWA.
+// Comprehensive Component & Navigation Tests for Vernie Pilot PWA.
 
 import React from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ChestLedState,
@@ -18,7 +18,6 @@ import { EyesVoiceStation } from "./components/EyesVoiceStation";
 import { MusicLightStation } from "./components/MusicLightStation";
 import { RoutinesStation } from "./components/RoutinesStation";
 import { SetupStation } from "./components/SetupStation";
-import { VirtualVernieSimulator } from "./sim/virtualVernie";
 import { mixArcadeToTank } from "./utils/driveMath";
 
 afterEach(() => {
@@ -46,62 +45,6 @@ function sampleTelemetry(overrides: Partial<TelemetryFrame> = {}): TelemetryFram
   };
 }
 
-describe("VirtualVernieSimulator physics & firmware safety parity", () => {
-  it("homes head before unlocking positioning and enforces 3-condition dart interlock", () => {
-    vi.useFakeTimers();
-    let latest: TelemetryFrame | null = null;
-    let firedAt = 0;
-
-    const sim = new VirtualVernieSimulator({
-      onTelemetry: (f) => {
-        latest = f;
-      },
-      onVisualChange: (v) => {
-        firedAt = v.dartFiredAt;
-      },
-    });
-    sim.setSoundEnabled(false);
-    sim.start();
-
-    expect(latest).not.toBeNull();
-    expect(latest!.flags & TelemetryFlag.HEAD_HOMED).toBe(0);
-
-    // Unhomed head move is safely ignored (C2)
-    void sim.sendHead(25);
-    act(() => {
-      vi.advanceTimersByTime(300);
-    });
-    expect(latest!.headDeg).toBe(0);
-
-    // Arm & try to fire while unhomed -> MUST NOT fire
-    void sim.sendDart(DartSubcmd.ARM);
-    expect(latest!.flags & TelemetryFlag.DART_ARMED).toBeTruthy();
-    void sim.sendDart(DartSubcmd.FIRE);
-    expect(firedAt).toBe(0);
-
-    // Home head -> completes and unlocks head & dart
-    void sim.sendHead(HEAD_HOME_SENTINEL);
-    act(() => {
-      vi.advanceTimersByTime(750);
-    });
-    expect(latest!.flags & TelemetryFlag.HEAD_HOMED).toBeTruthy();
-
-    // Pick up Vernie -> auto-disarms dart immediately
-    sim.togglePickedUp();
-    expect(latest!.flags & TelemetryFlag.PICKED_UP).toBeTruthy();
-    expect(latest!.flags & TelemetryFlag.DART_ARMED).toBe(0);
-
-    // Set down, arm, and fire -> succeeds & auto-disarms immediately
-    sim.togglePickedUp();
-    void sim.sendDart(DartSubcmd.ARM);
-    void sim.sendDart(DartSubcmd.FIRE);
-    expect(firedAt).toBeGreaterThan(0);
-    expect(latest!.flags & TelemetryFlag.DART_ARMED).toBe(0);
-
-    sim.stop();
-  });
-});
-
 describe("DriveStation joystick, speed presets, C2 head lock & flip-cover dart", () => {
   it("mixArcadeToTank normalizes arcade stick into tank speeds", () => {
     expect(mixArcadeToTank(0.05, 0.05, 65)).toEqual({ left: 0, right: 0 });
@@ -116,7 +59,6 @@ describe("DriveStation joystick, speed presets, C2 head lock & flip-cover dart",
 
     const baseProps = {
       connected: true,
-      demoMode: false,
       disabled: false,
       hubRgb: [0, 168, 232] as [number, number, number],
       chestLedState: ChestLedState.OFF,
@@ -301,7 +243,6 @@ describe("SetupStation wireless updater validation", () => {
       <SetupStation
         bleSupported={true}
         connectionState="disconnected"
-        demoMode={false}
         telemetry={null}
         rxHz={0}
         onRebootToBootloader={vi.fn().mockResolvedValue(undefined)}
@@ -321,8 +262,8 @@ describe("SetupStation wireless updater validation", () => {
   });
 });
 
-describe("App shell Demo Mode & 5-station navigation", () => {
-  it("launches Interactive Demo Mode, navigates all 5 stations, and unmounts cleanly", () => {
+describe("App shell 5-station navigation & zero Demo Mode", () => {
+  it("renders cleanly without any Demo Mode buttons, navigates all 5 stations, and unmounts cleanly", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     const { unmount } = render(
       <React.StrictMode>
@@ -331,8 +272,7 @@ describe("App shell Demo Mode & 5-station navigation", () => {
     );
 
     expect(screen.getByRole("heading", { level: 1, name: /Vernie Pilot/i })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /^Try Demo$/i }));
-    expect(screen.getByText(/Interactive Demo Robot/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Demo/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: /Music & Lights/i }));
     expect(screen.getByText(/Singing-Motor Piano/i)).toBeTruthy();
@@ -341,7 +281,8 @@ describe("App shell Demo Mode & 5-station navigation", () => {
     expect(screen.getByText(/Routine Builder/i)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: /FPV Rover/i }));
-    expect(screen.getByText(/Chromebook FPV Driver/i)).toBeTruthy();
+    expect(screen.getByText(/Automatic Wi-Fi Discovery · No IP Address Needed/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Demo/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: /Setup/i }));
     expect(screen.getByText(/Wireless Firmware Setup/i)).toBeTruthy();

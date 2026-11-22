@@ -23,7 +23,6 @@ export interface DriveStationProps {
   chassis?: ChassisProfile;
   headlightsOn?: boolean;
   connected: boolean;
-  demoMode: boolean;
   disabled: boolean;
   telemetry: TelemetryFrame | null;
   hubRgb: [number, number, number];
@@ -37,10 +36,6 @@ export interface DriveStationProps {
   onSynth: (voice: number, presetOrNote: number, durMs?: number) => void;
   onChangeChassis?: (next: ChassisProfile) => void;
   onOpenFpv?: () => void;
-  onLaunchDemo?: () => void;
-  onDemoTogglePickup?: () => void;
-  onDemoBump?: () => void;
-  onDemoBrick?: (colorId: number) => void;
 }
 
 const SPEED_PRESETS = [
@@ -86,7 +81,6 @@ export const DriveStation: React.FC<DriveStationProps> = ({
   chassis = "vernie",
   headlightsOn = false,
   connected,
-  demoMode,
   disabled,
   telemetry,
   hubRgb,
@@ -100,10 +94,6 @@ export const DriveStation: React.FC<DriveStationProps> = ({
   onSynth,
   onChangeChassis,
   onOpenFpv,
-  onLaunchDemo,
-  onDemoTogglePickup,
-  onDemoBump,
-  onDemoBrick,
 }) => {
   const [driveMode, setDriveMode] = useState<"joystick" | "dual">("joystick");
   const [speedCap, setSpeedCap] = useState(65);
@@ -343,7 +333,6 @@ export const DriveStation: React.FC<DriveStationProps> = ({
           chassis={chassis}
           headlightsOn={headlightsOn}
           connected={connected}
-          demoMode={demoMode}
           telemetry={telemetry}
           hubRgb={hubRgb}
           chestLedState={chestLedState}
@@ -354,10 +343,6 @@ export const DriveStation: React.FC<DriveStationProps> = ({
               onSynth(0, 2, 0);
             }
           }}
-          onLaunchDemo={onLaunchDemo}
-          onDemoTogglePickup={onDemoTogglePickup}
-          onDemoBump={onDemoBump}
-          onDemoBrick={onDemoBrick}
         />
 
         <section className="console-panel compact-panel" aria-label="Quick personality selector">

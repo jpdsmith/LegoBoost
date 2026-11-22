@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Vernie Pilot — Tactile, User-Friendly Progressive Web App for LEGO BOOST Vernie OS.
-// Supports Tank/Rover FPV mode (Android Phone <-> Chromebook + Xbox Controller),
-// Vernie humanoid mode, live Web Bluetooth control, and built-in interactive Demo Simulator.
+// Vernie Pilot — Tactile Progressive Web App for LEGO BOOST Vernie OS.
+// Supports Tank/Rover FPV mode (Android Phone <-> Chromebook + Xbox Controller with Same-Wi-Fi Auto-Discovery),
+// Vernie humanoid mode, live Web Bluetooth control, Smart Co-Pilot & Smooth Autonomous Explorer.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -27,23 +27,9 @@ import { RoverCockpitStation } from "./components/RoverCockpitStation";
 import { SetupStation } from "./components/SetupStation";
 import { TopConsoleBar } from "./components/TopConsoleBar";
 import { ChassisProfile } from "./components/VernieTwin";
-import { VirtualVernieSimulator, VirtualVisualState } from "./sim/virtualVernie";
+import { isMetaQuestBrowser } from "./xr/questVrCockpit";
 
 type PilotStation = "drive" | "fpv" | "music" | "routines" | "setup";
-
-const INITIAL_VISUAL: VirtualVisualState = {
-  hubRgb: [0, 168, 232],
-  chestLedState: ChestLedState.OFF,
-  homingInProgress: false,
-  dartFiredAt: 0,
-  activeMacroStepIndex: null,
-  macroPlaying: false,
-  savedMacroCount: 0,
-  soundEnabled: true,
-  floorX: 0,
-  floorY: 0,
-  headingDeg: 0,
-};
 
 function readInitialChassis(): ChassisProfile {
   try {
@@ -55,9 +41,25 @@ function readInitialChassis(): ChassisProfile {
   return "rover";
 }
 
+function readInitialStation(): PilotStation {
+  if (typeof window === "undefined") return "drive";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("role") === "host" || params.get("join")) {
+      return "fpv";
+    }
+    if (isMetaQuestBrowser()) {
+      return "fpv";
+    }
+  } catch {
+    // ignore
+  }
+  return "drive";
+}
+
 export const App: React.FC = () => {
   const bleSupported = typeof navigator !== "undefined" && Boolean(navigator.bluetooth);
-  const [station, setStation] = useState<PilotStation>("drive");
+  const [station, setStation] = useState<PilotStation>(readInitialStation);
   const [chassis, setChassis] = useState<ChassisProfile>(readInitialChassis);
   const [headlightsOn, setHeadlightsOn] = useState(false);
 
@@ -67,16 +69,17 @@ export const App: React.FC = () => {
   const [rxHz, setRxHz] = useState(0);
   const [bleError, setBleError] = useState<string | null>(null);
 
+  // Wi-Fi FPV remote status mirrored up to TopConsoleBar
+  const [wifiConnected, setWifiConnected] = useState(false);
+  const [wifiLabel, setWifiLabel] = useState("");
+  const [wifiTelemetry, setWifiTelemetry] = useState<TelemetryFrame | null>(null);
+  const [emergencyStopSeq, setEmergencyStopSeq] = useState(0);
+
   // Optimistic visual state for live BLE
   const [bleHubRgb, setBleHubRgb] = useState<[number, number, number]>([0, 168, 232]);
   const [bleChestLed, setBleChestLed] = useState<number>(ChestLedState.OFF);
   const [bleHoming, setBleHoming] = useState(false);
   const [bleDartFiredAt, setBleDartFiredAt] = useState(0);
-
-  // Interactive Demo Mode state
-  const [demoMode, setDemoMode] = useState(false);
-  const [demoTelemetry, setDemoTelemetry] = useState<TelemetryFrame | null>(null);
-  const [demoVisual, setDemoVisual] = useState<VirtualVisualState>(INITIAL_VISUAL);
 
   const timestampsRef = useRef<number[]>([]);
   const lastRxRef = useRef<number>(0);
@@ -90,12 +93,12 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const sim = useMemo(
-    () =>
-      new VirtualVernieSimulator({
-        onTelemetry: (frame) => setDemoTelemetry(frame),
-        onVisualChange: (vis) => setDemoVisual(vis),
-      }),
+  const handleWifiStatusChange = useCallback(
+    (isConnected: boolean, label: string, remoteTelem: TelemetryFrame | null) => {
+      setWifiConnected(isConnected);
+      setWifiLabel(label);
+      setWifiTelemetry(remoteTelem);
+    },
     []
   );
 
@@ -105,10 +108,6 @@ export const App: React.FC = () => {
         onStateChange: (next, name) => {
           setConnState(next);
           if (name) setDeviceName(name);
-          if (next === "connected") {
-            setDemoMode(false);
-            sim.stop();
-          }
           if (next === "disconnected") {
             setBleTelemetry(null);
             setRxHz(0);
@@ -136,26 +135,15 @@ export const App: React.FC = () => {
         },
         onError: (err) => setBleError(err.message),
       }),
-    [sim]
+    []
   );
 
   // Clean unmount teardown
   useEffect(() => {
     return () => {
       client.disconnect();
-      sim.stop();
     };
-  }, [client, sim]);
-
-  // Start/stop virtual robot simulator cleanly when toggling Demo Mode
-  useEffect(() => {
-    if (demoMode && connState !== "connected") {
-      sim.start();
-      return () => sim.stop();
-    }
-    sim.stop();
-    return undefined;
-  }, [demoMode, connState, sim]);
+  }, [client]);
 
   // Decay BLE RX Hz to 0 if telemetry stalls
   useEffect(() => {
@@ -170,19 +158,12 @@ export const App: React.FC = () => {
   }, [connState]);
 
   const isLiveBle = connState === "connected";
-  const isDemoActive = demoMode && !isLiveBle;
-  const isOnline = isLiveBle || isDemoActive;
-  const activeTelemetry = isLiveBle ? bleTelemetry : isDemoActive ? demoTelemetry : null;
-  const activeHubRgb = isLiveBle ? bleHubRgb : demoVisual.hubRgb;
-  const activeChestLed = isLiveBle ? bleChestLed : demoVisual.chestLedState;
-  const activeHoming = isLiveBle ? bleHoming : demoVisual.homingInProgress;
-  const activeDartFiredAt = isLiveBle ? bleDartFiredAt : demoVisual.dartFiredAt;
-
+  const activeTelemetry = isLiveBle ? bleTelemetry : wifiTelemetry;
   const safeMode = Boolean(activeTelemetry && (activeTelemetry.flags & TelemetryFlag.SAFE_MODE));
   const headHomed = Boolean(activeTelemetry && (activeTelemetry.flags & TelemetryFlag.HEAD_HOMED));
   const pickedUp = Boolean(activeTelemetry && (activeTelemetry.flags & TelemetryFlag.PICKED_UP));
   const synthActive = Boolean(activeTelemetry && (activeTelemetry.flags & TelemetryFlag.SYNTH_ACTIVE));
-  const motionDisabled = !isOnline || !activeTelemetry || safeMode;
+  const motionDisabled = !isLiveBle || !bleTelemetry || safeMode;
 
   const runBle = useCallback(async (fn: () => Promise<void>) => {
     setBleError(null);
@@ -207,11 +188,9 @@ export const App: React.FC = () => {
     (left: number, right: number, timeoutMs = 400) => {
       if (isLiveBle) {
         client.sendDrive(left, right, timeoutMs);
-      } else if (isDemoActive) {
-        sim.sendDrive(left, right, timeoutMs);
       }
     },
-    [client, isDemoActive, isLiveBle, sim]
+    [client, isLiveBle]
   );
 
   const handleHead = useCallback(
@@ -219,11 +198,9 @@ export const App: React.FC = () => {
       if (isLiveBle) {
         if (angleDeg === HEAD_HOME_SENTINEL) setBleHoming(true);
         void runBle(() => client.sendHead(angleDeg, speed, { coalesce }));
-      } else if (isDemoActive) {
-        void sim.sendHead(angleDeg);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleDart = useCallback(
@@ -231,22 +208,18 @@ export const App: React.FC = () => {
       if (isLiveBle) {
         if (subcmd === DartSubcmd.FIRE) setBleDartFiredAt(Date.now());
         void runBle(() => client.sendDart(subcmd));
-      } else if (isDemoActive) {
-        void sim.sendDart(subcmd);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleSynth = useCallback(
     (voice: number, presetOrNote: number, durMs = 280) => {
       if (isLiveBle) {
         void runBle(() => client.sendSynth(voice, presetOrNote, durMs));
-      } else if (isDemoActive) {
-        void sim.sendSynth(voice, presetOrNote, durMs);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleHubLed = useCallback(
@@ -254,11 +227,9 @@ export const App: React.FC = () => {
       if (isLiveBle) {
         setBleHubRgb([r, g, b]);
         void runBle(() => client.sendHubLed(r, g, b));
-      } else if (isDemoActive) {
-        void sim.sendHubLed(r, g, b);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleChestLed = useCallback(
@@ -266,22 +237,18 @@ export const App: React.FC = () => {
       if (isLiveBle) {
         setBleChestLed(state);
         void runBle(() => client.sendChestLed(state));
-      } else if (isDemoActive) {
-        void sim.sendChestLed(state);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleSetMode = useCallback(
     (modeId: number) => {
       if (isLiveBle) {
         void runBle(() => client.sendSetMode(modeId));
-      } else if (isDemoActive) {
-        void sim.sendSetMode(modeId);
       }
     },
-    [client, isDemoActive, isLiveBle, runBle, sim]
+    [client, isLiveBle, runBle]
   );
 
   const handleUploadMacro = useCallback(
@@ -289,42 +256,34 @@ export const App: React.FC = () => {
       if (isLiveBle) {
         return runBleThrowing(() => client.uploadMacro(steps, options));
       }
-      if (isDemoActive) {
-        return sim.uploadMacro(steps, options);
-      }
       return Promise.resolve();
     },
-    [client, isDemoActive, isLiveBle, runBleThrowing, sim]
+    [client, isLiveBle, runBleThrowing]
   );
 
   const handlePlayMacro = useCallback(() => {
     if (isLiveBle) return runBleThrowing(() => client.playMacro());
-    if (isDemoActive) return sim.playMacro();
     return Promise.resolve();
-  }, [client, isDemoActive, isLiveBle, runBleThrowing, sim]);
+  }, [client, isLiveBle, runBleThrowing]);
 
   const handleStopMacro = useCallback(() => {
     if (isLiveBle) return runBleThrowing(() => client.stopMacro());
-    if (isDemoActive) return sim.stopMacro();
     return Promise.resolve();
-  }, [client, isDemoActive, isLiveBle, runBleThrowing, sim]);
+  }, [client, isLiveBle, runBleThrowing]);
 
   const handleClearMacro = useCallback(() => {
     if (isLiveBle) return runBleThrowing(() => client.clearMacro(true));
-    if (isDemoActive) return sim.clearMacro();
     return Promise.resolve();
-  }, [client, isDemoActive, isLiveBle, runBleThrowing, sim]);
+  }, [client, isLiveBle, runBleThrowing]);
 
   const handleEmergencyStop = useCallback(() => {
+    setEmergencyStopSeq((s) => s + 1);
     handleDrive(0, 0, 200);
     if (isLiveBle) {
       void client.stopMacro().catch(() => undefined);
       void client.sendSynth(0, 0, 0).catch(() => undefined);
-    } else if (isDemoActive) {
-      void sim.stopMacro();
-      void sim.sendSynth(0, 0, 0);
     }
-  }, [client, handleDrive, isDemoActive, isLiveBle, sim]);
+  }, [client, handleDrive, isLiveBle]);
 
   const navItems: Array<{
     id: PilotStation;
@@ -343,18 +302,13 @@ export const App: React.FC = () => {
       <TopConsoleBar
         bleSupported={bleSupported}
         connectionState={connState}
-        demoMode={isDemoActive}
-        demoSound={demoVisual.soundEnabled}
+        remoteWifiConnected={wifiConnected}
+        remoteWifiLabel={wifiLabel}
         deviceName={deviceName}
         telemetry={activeTelemetry}
         bleError={bleError}
         onConnect={() => void runBle(() => client.connect())}
         onDisconnect={() => client.disconnect()}
-        onToggleDemo={() => {
-          setBleError(null);
-          setDemoMode((v) => !v);
-        }}
-        onToggleDemoSound={() => sim.setSoundEnabled(!demoVisual.soundEnabled)}
         onEmergencyStop={handleEmergencyStop}
         onGoToSetup={() => setStation("setup")}
       />
@@ -383,14 +337,13 @@ export const App: React.FC = () => {
           <DriveStation
             chassis={chassis}
             headlightsOn={headlightsOn}
-            connected={isOnline}
-            demoMode={isDemoActive}
+            connected={isLiveBle}
             disabled={motionDisabled}
-            telemetry={activeTelemetry}
-            hubRgb={activeHubRgb}
-            chestLedState={activeChestLed}
-            homingInProgress={activeHoming}
-            dartFiredAt={activeDartFiredAt}
+            telemetry={bleTelemetry}
+            hubRgb={bleHubRgb}
+            chestLedState={bleChestLed}
+            homingInProgress={bleHoming}
+            dartFiredAt={bleDartFiredAt}
             onDrive={handleDrive}
             onHead={handleHead}
             onDartSubcmd={handleDart}
@@ -398,54 +351,40 @@ export const App: React.FC = () => {
             onSynth={handleSynth}
             onChangeChassis={handleChassisChange}
             onOpenFpv={() => setStation("fpv")}
-            onLaunchDemo={() => {
-              setBleError(null);
-              setDemoMode(true);
-            }}
-            onDemoTogglePickup={() => sim.togglePickedUp()}
-            onDemoBump={() => sim.triggerBump()}
-            onDemoBrick={(cid) => sim.presentColorBrick(cid)}
           />
         )}
 
-        {station === "fpv" && (
-          <RoverCockpitStation
-            connected={isOnline}
-            demoMode={isDemoActive}
-            disabled={motionDisabled}
-            safeMode={safeMode}
-            headHomed={headHomed}
-            headDeg={activeTelemetry?.headDeg ?? 0}
-            pickedUp={pickedUp}
-            distancePct={activeTelemetry?.distancePct ?? 255}
-            telemetry={activeTelemetry}
-            floorX={demoVisual.floorX}
-            floorY={demoVisual.floorY}
-            headingDeg={demoVisual.headingDeg}
-            headlightsOn={headlightsOn}
-            onHeadlightsChange={setHeadlightsOn}
-            onSimulatedDistance={(pct) => sim.setSimulatedDistance(pct)}
-            onLaunchDemo={() => {
-              setBleError(null);
-              setDemoMode(true);
-            }}
-            onDrive={handleDrive}
-            onHead={handleHead}
-            onSynth={handleSynth}
-            onSetHubLed={handleHubLed}
-            onSetMode={handleSetMode}
-            onPlayMacro={handlePlayMacro}
-            onStopMacro={handleStopMacro}
-          />
-        )}
+        {/* Kept mounted across tab switches so Wi-Fi FPV & Android Host camera never drop! */}
+        <RoverCockpitStation
+          isActiveTab={station === "fpv"}
+          connected={isLiveBle}
+          disabled={motionDisabled}
+          safeMode={safeMode}
+          headHomed={headHomed}
+          headDeg={bleTelemetry?.headDeg ?? 0}
+          pickedUp={pickedUp}
+          distancePct={bleTelemetry?.distancePct ?? 255}
+          telemetry={bleTelemetry}
+          headlightsOn={headlightsOn}
+          emergencyStopSeq={emergencyStopSeq}
+          onHeadlightsChange={setHeadlightsOn}
+          onWifiStatusChange={handleWifiStatusChange}
+          onDrive={handleDrive}
+          onHead={handleHead}
+          onSynth={handleSynth}
+          onSetHubLed={handleHubLed}
+          onSetMode={handleSetMode}
+          onPlayMacro={handlePlayMacro}
+          onStopMacro={handleStopMacro}
+        />
 
         {station === "music" && (
           <MusicLightStation
-            connected={isOnline}
+            connected={isLiveBle}
             disabled={motionDisabled}
             synthActive={synthActive}
-            hubRgb={activeHubRgb}
-            chestLedState={activeChestLed}
+            hubRgb={bleHubRgb}
+            chestLedState={bleChestLed}
             onSynth={handleSynth}
             onSetHubLed={handleHubLed}
             onSetChestLed={handleChestLed}
@@ -454,10 +393,10 @@ export const App: React.FC = () => {
 
         {station === "routines" && (
           <RoutinesStation
-            connected={isOnline}
+            connected={isLiveBle}
             disabled={motionDisabled}
-            activeModeId={activeTelemetry ? activeTelemetry.modeId : null}
-            activeMacroStepIndex={isDemoActive ? demoVisual.activeMacroStepIndex : null}
+            activeModeId={bleTelemetry ? bleTelemetry.modeId : null}
+            activeMacroStepIndex={null}
             onSetMode={handleSetMode}
             onUploadMacro={handleUploadMacro}
             onPlayMacro={handlePlayMacro}
@@ -470,9 +409,8 @@ export const App: React.FC = () => {
           <SetupStation
             bleSupported={bleSupported}
             connectionState={connState}
-            demoMode={isDemoActive}
-            telemetry={activeTelemetry}
-            rxHz={isDemoActive ? 10.0 : rxHz}
+            telemetry={bleTelemetry}
+            rxHz={rxHz}
             onRebootToBootloader={() => client.rebootToBootloader()}
           />
         )}

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Interactive Live Vernie Digital Twin — reflects live telemetry (or Demo simulation):
+// Interactive Live Vernie & Tank Rover Digital Twin — reflects live telemetry:
 // head rotation, expressive orange eyebrows, eye tracking & blinking, Hub RGB glow,
 // 88007 chest distance/color sensor, animated tank treads, IMU tilt, and dart recoil.
 
@@ -12,17 +12,12 @@ export interface VernieTwinProps {
   chassis?: ChassisProfile;
   headlightsOn?: boolean;
   connected: boolean;
-  demoMode: boolean;
   telemetry: TelemetryFrame | null;
   hubRgb: [number, number, number];
   chestLedState: number;
   homingInProgress: boolean;
   dartFiredAt: number;
   onTapFace?: () => void;
-  onLaunchDemo?: () => void;
-  onDemoTogglePickup?: () => void;
-  onDemoBump?: () => void;
-  onDemoBrick?: (colorId: number) => void;
 }
 
 const LEGO_BRICK_MAP: Record<number, { name: string; hex: string }> = {
@@ -45,17 +40,12 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
   chassis = "vernie",
   headlightsOn = false,
   connected,
-  demoMode,
   telemetry,
   hubRgb,
   chestLedState,
   homingInProgress,
   dartFiredAt,
   onTapFace,
-  onLaunchDemo,
-  onDemoTogglePickup,
-  onDemoBump,
-  onDemoBrick,
 }) => {
   const isRover = chassis === "rover";
   const [blinking, setBlinking] = useState(false);
@@ -199,7 +189,7 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
             type="button"
             className="twin-svg-btn"
             onClick={onTapFace}
-            title={connected ? "Tap Vernie for a friendly chirp" : "Connect or try Demo Mode"}
+            title={connected ? "Tap robot for a friendly chirp" : "Connect robot via Bluetooth"}
             aria-label="Interact with Vernie avatar"
           >
             <svg
@@ -575,52 +565,6 @@ export const VernieTwin: React.FC<VernieTwinProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Offline first-visit invitation */}
-      {!connected && !demoMode && onLaunchDemo && (
-        <div className="standby-invite-bar">
-          <span>Pair your Move Hub via Bluetooth, or explore everything with our live virtual robot.</span>
-          <button type="button" className="chip-btn chip-btn-amber" onClick={onLaunchDemo}>
-            Try Demo Robot
-          </button>
-        </div>
-      )}
-
-      {/* Interactive Demo Sandbox triggers — only shown when testing in Demo Mode */}
-      {demoMode && (
-        <div className="demo-sandbox-bar" aria-label="Demo sensor triggers">
-          <span className="demo-sandbox-label">Simulate Robot Sensors</span>
-          <div className="demo-sandbox-btns">
-            <button
-              type="button"
-              className={`chip-btn chip-compact ${pickedUp ? "chip-btn-warn" : ""}`}
-              onClick={onDemoTogglePickup}
-            >
-              {pickedUp ? "Set Down" : "Pick Up"}
-            </button>
-            <button type="button" className="chip-btn chip-compact" onClick={onDemoBump}>
-              Bump
-            </button>
-            {[
-              { id: 5, label: "Green", hex: "#16A34A" },
-              { id: 9, label: "Red", hex: "#DC2626" },
-              { id: 3, label: "Blue", hex: "#2563EB" },
-              { id: 7, label: "Yellow", hex: "#EAB308" },
-            ].map((b) => (
-              <button
-                key={b.id}
-                type="button"
-                className="chip-btn chip-compact"
-                onClick={() => onDemoBrick?.(b.id)}
-                title={`Hold ${b.label} LEGO brick in front of chest sensor`}
-              >
-                <span className="chip-dot" style={{ background: b.hex }} />
-                {b.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 };

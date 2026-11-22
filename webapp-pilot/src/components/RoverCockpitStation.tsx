@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-// FPV Rover Station — Full 3-Phase Tank/Rover Experience:
-//   Phase 1: Two-Device Android Phone (Host) <-> Chromebook (FPV + Xbox Driver) WebRTC Bridge
-//   Phase 2: Real-Time 5-Sector Floor Vision, Optical Flow, Tap-to-Follow (AI + HSV), Smart Co-Pilot
-//   Phase 3: Autonomous Vision Explorer, Live 2D Occupancy Room Map & Photo Discovery Log
+// FPV Rover Station — Two-Device Android Phone (on Tank) <-> Chromebook (+ Xbox Controller)
+//   - Zero-IP Same-Wi-Fi Auto-Discovery + 4-Letter Room Code + Offline Direct Fallback
+//   - Port-443 HTTPS + MQTT Dual-Relay WebRTC P2P Video & Low-Latency DataChannel (500ms Failsafe)
+//   - Smart Co-Pilot ADAS (5-Sector Floor Clearance, Auto-Brake / Smart Dodge, Heading Hold, Tap-to-Follow)
+//   - Smooth Continuous Autonomous Explorer, Live 2D Occupancy Room Map & On-the-Fly Discovery Log
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { TelemetryFlag, TelemetryFrame } from "@core/ble/protocol";
@@ -30,7 +31,11 @@ import {
   RoverVisionSnapshot,
   RoverWebRtcBridge,
 } from "../rtc/roverBridge";
-import { renderVirtualRoverCamera } from "../sim/virtualRoverCamera";
+import {
+  DiscoveredTank,
+  WifiTankAdvertiser,
+  WifiTankScanner,
+} from "../rtc/wifiDiscovery";
 import { mixArcadeToTank } from "../utils/driveMath";
 import { OnDeviceObjectDetector } from "../vision/aiObjectDetector";
 import {
@@ -47,17 +52,26 @@ import {
   IconCompass,
   IconFlashlight,
   IconMic,
+  IconRefresh,
   IconShield,
   IconStop,
   IconTarget,
+  IconVrHeadset,
   IconWifi,
 } from "./Icons";
 import { RoomMapCanvas } from "./RoomMapCanvas";
 import { XboxHudStrip } from "./XboxHudStrip";
+import { QuestControlSample } from "../xr/questControllers";
+import {
+  checkWebXrVrSupported,
+  isMetaQuestBrowser,
+  QuestVrCockpitSession,
+  VrHudState,
+} from "../xr/questVrCockpit";
 
 export interface RoverCockpitStationProps {
+  isActiveTab: boolean;
   connected: boolean;
-  demoMode: boolean;
   disabled: boolean;
   safeMode: boolean;
   headHomed: boolean;
@@ -65,13 +79,10 @@ export interface RoverCockpitStationProps {
   pickedUp: boolean;
   distancePct: number;
   telemetry: TelemetryFrame | null;
-  floorX: number;
-  floorY: number;
-  headingDeg: number;
   headlightsOn: boolean;
+  emergencyStopSeq: number;
   onHeadlightsChange: (on: boolean) => void;
-  onSimulatedDistance?: (pct: number) => void;
-  onLaunchDemo: () => void;
+  onWifiStatusChange?: (connected: boolean, label: string, remoteTelemetry: TelemetryFrame | null) => void;
   onDrive: (left: number, right: number, timeoutMs?: number) => void;
   onHead: (angleDeg: number, speed?: number, coalesce?: boolean) => void;
   onSynth: (voice: number, presetOrNote: number, durMs?: number) => void;
@@ -130,10 +141,10 @@ const QUICK_PHRASES = [
   "Stop",
 ];
 const EXPLORER_MISSIONS: Array<{ id: ExplorerMission; label: string; sub: string }> = [
-  { id: "explore-room", label: "Explore Room", sub: "Map new floor areas" },
+  { id: "explore-room", label: "Explore Room", sub: "Cruise smoothly & map new floor" },
   { id: "find-person", label: "Find Person", sub: "Seek & greet a human" },
-  { id: "find-object", label: "Find Objects", sub: "Photograph landmarks" },
-  { id: "return-home", label: "Return Home", sub: "Steer back to start" },
+  { id: "find-object", label: "Find Objects", sub: "Log landmarks on the fly" },
+  { id: "return-home", label: "Return Home", sub: "Curve back to start" },
 ];
 const VISION_W = 80;
 const VISION_H = 60;
@@ -153,22 +164,37 @@ function compassLabel(deg: number): string {
   return `${Math.round(norm)}° ${dirs[Math.round(norm / 45) % 8]}`;
 }
 
-function readInitialQueryParams(): { subView: RoverSubView; joinCode: string } {
-  if (typeof window === "undefined") return { subView: "driver", joinCode: "" };
+function isLikelyAndroidPhone(): boolean {
+  if (typeof navigator === "undefined") return false;
+  if (isMetaQuestBrowser()) return false;
+  const ua = navigator.userAgent || "";
+  return /Android/i.test(ua) && /Mobile/i.test(ua);
+}
+
+function readInitialQueryParams(): { subView: RoverSubView; joinCode: string; autoJoin: boolean } {
+  if (typeof window === "undefined") {
+    return { subView: "driver", joinCode: "", autoJoin: false };
+  }
   try {
     const params = new URLSearchParams(window.location.search);
     const role = params.get("role");
     const join = params.get("join");
+    if (role === "host") return { subView: "host", joinCode: "", autoJoin: false };
+    if (join) {
+      const clean = normalizeRoomCode(join);
+      return { subView: "driver", joinCode: clean, autoJoin: clean.length >= 3 };
+    }
     return {
-      subView: role === "host" ? "host" : "driver",
-      joinCode: join ? normalizeRoomCode(join) : "",
+      subView: isLikelyAndroidPhone() ? "host" : "driver",
+      joinCode: "",
+      autoJoin: false,
     };
   } catch {
-    return { subView: "driver", joinCode: "" };
+    return { subView: "driver", joinCode: "", autoJoin: false };
   }
 }
 
-function captureThumbnail(source: HTMLVideoElement | HTMLCanvasElement | null): string | undefined {
+function captureThumbnail(source: HTMLVideoElement | null): string | undefined {
   if (!source) return undefined;
   try {
     const c = document.createElement("canvas");
@@ -184,8 +210,8 @@ function captureThumbnail(source: HTMLVideoElement | HTMLCanvasElement | null): 
 }
 
 export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
+  isActiveTab,
   connected,
-  demoMode,
   disabled,
   safeMode,
   headHomed,
@@ -193,13 +219,10 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   pickedUp,
   distancePct,
   telemetry,
-  floorX,
-  floorY,
-  headingDeg,
   headlightsOn,
+  emergencyStopSeq,
   onHeadlightsChange,
-  onSimulatedDistance,
-  onLaunchDemo,
+  onWifiStatusChange,
   onDrive,
   onHead,
   onSynth,
@@ -208,16 +231,26 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   onPlayMacro,
   onStopMacro,
 }) => {
-  const initParams = readInitialQueryParams();
+  const initParams = useRef(readInitialQueryParams()).current;
   const [subView, setSubView] = useState<RoverSubView>(initParams.subView);
   const [roomCode, setRoomCode] = useState<string>(() => generateRoomCode(4));
   const [joinCode, setJoinCode] = useState<string>(initParams.joinCode);
   const [linkState, setLinkState] = useState<BridgeLinkState>("idle");
   const [linkDetail, setLinkDetail] = useState<string>("Not paired over Wi-Fi yet");
   const [pingMs, setPingMs] = useState<number | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [showOfflineFallback, setShowOfflineFallback] = useState(false);
   const [offlineOfferText, setOfflineOfferText] = useState("");
   const [offlineAnswerText, setOfflineAnswerText] = useState("");
+
+  // Same-Wi-Fi Auto-Discovery state
+  const [discoveredTanks, setDiscoveredTanks] = useState<DiscoveredTank[]>([]);
+  const [discoveryStatus, setDiscoveryStatus] = useState<string>(
+    "Checking your Wi-Fi for nearby tanks (no IP address needed)…"
+  );
+  const [hostDiscoveryNote, setHostDiscoveryNote] = useState<string>(
+    "Auto-discovery activates once you start hosting"
+  );
 
   // Smart Co-Pilot & Autonomous Explorer config
   const [speedCap, setSpeedCap] = useState<number>(65);
@@ -230,7 +263,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const [showCorridors, setShowCorridors] = useState<boolean>(true);
   const [mission, setMission] = useState<ExplorerMission>("explore-room");
   const [assistNote, setAssistNote] = useState<string>(
-    "Smart Co-Pilot ready — tap any object to follow"
+    "Smart Co-Pilot ready — tap any object on live video to follow"
   );
   const [assistIntervening, setAssistIntervening] = useState<string>("none");
   const [explorerState, setExplorerState] = useState<ExplorerFsmState | string>("CRUISING");
@@ -257,6 +290,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const [hasRemoteVideo, setHasRemoteVideo] = useState<boolean>(false);
 
   // Android Rover Host state
+  const [hostActive, setHostActive] = useState(false);
   const [hostCameraActive, setHostCameraActive] = useState(false);
   const [hostCameraError, setHostCameraError] = useState<string | null>(null);
   const [hostTorchSupported, setHostTorchSupported] = useState(false);
@@ -272,14 +306,30 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [feed, setFeed] = useState<VoiceBubble[]>([]);
 
+  // Meta Quest / WebXR Immersive VR Cockpit state
+  const isQuestBrowser = isMetaQuestBrowser();
+  const [xrVrSupported, setXrVrSupported] = useState(false);
+  const [vrActive, setVrActive] = useState(false);
+  const [vrError, setVrError] = useState<string | null>(null);
+
   // Refs
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const hostVideoRef = useRef<HTMLVideoElement | null>(null);
-  const demoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const visionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const hostStreamRef = useRef<MediaStream | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const bridgeRef = useRef<RoverWebRtcBridge | null>(null);
+  const scannerRef = useRef<WifiTankScanner | null>(null);
+  const advertiserRef = useRef<WifiTankAdvertiser | null>(null);
+  const vrSessionRef = useRef<QuestVrCockpitSession | null>(null);
+  const vrHudRef = useRef<VrHudState | null>(null);
+  const vrMotorsRef = useRef<{ left: number; right: number; steer: number }>({
+    left: 0,
+    right: 0,
+    steer: 0,
+  });
+  const vrWasDrivingRef = useRef(false);
+  const lastVrInterveningRef = useRef<string>("none");
   const xboxRef = useRef(new XboxControllerReader());
   const driveCtrlRef = useRef(new IntelligentDriveController());
   const explorerRef = useRef(new IntelligentExplorer());
@@ -309,12 +359,13 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const voiceSeqRef = useRef(1);
   const discoverySeqRef = useRef(1);
+  const autoJoinedRef = useRef(false);
 
   lockedLabelRef.current = lockedLabel;
 
   const liveRef = useRef({
+    isActiveTab,
     connected,
-    demoMode,
     disabled,
     safeMode,
     headHomed,
@@ -322,9 +373,6 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     pickedUp,
     distancePct,
     telemetry,
-    floorX,
-    floorY,
-    headingDeg,
     headlightsOn,
     speedCap,
     assistMode,
@@ -338,8 +386,8 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     ttsEnabled,
   });
   liveRef.current = {
+    isActiveTab,
     connected,
-    demoMode,
     disabled,
     safeMode,
     headHomed,
@@ -347,9 +395,6 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     pickedUp,
     distancePct,
     telemetry,
-    floorX,
-    floorY,
-    headingDeg,
     headlightsOn,
     speedCap,
     assistMode,
@@ -372,7 +417,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     onPlayMacro,
     onStopMacro,
     onHeadlightsChange,
-    onSimulatedDistance,
+    onWifiStatusChange,
   });
   cbRef.current = {
     onDrive,
@@ -383,17 +428,53 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     onPlayMacro,
     onStopMacro,
     onHeadlightsChange,
-    onSimulatedDistance,
+    onWifiStatusChange,
   };
 
-  // Lazy-load AI Object Detector when toggled ON
+  const isRemoteDriverLive =
+    linkState === "connected" && bridgeRef.current?.getRole() === "driver-client";
+
+  // Report Wi-Fi link & remote telemetry up to TopConsoleBar
+  useEffect(() => {
+    const label = isRemoteDriverLive
+      ? `Wi-Fi FPV Live${pingMs ? ` · ${pingMs} ms` : ""}`
+      : "";
+    cbRef.current.onWifiStatusChange?.(isRemoteDriverLive, label, isRemoteDriverLive ? remoteTelemetry : null);
+  }, [isRemoteDriverLive, pingMs, remoteTelemetry]);
+
+  // Update advertiser metadata whenever Bluetooth or camera readiness changes on Android Host
+  useEffect(() => {
+    if (!hostActive || !advertiserRef.current) return;
+    advertiserRef.current.update({
+      code: roomCode,
+      bleConnected: connected,
+      cameraReady: hostCameraActive,
+    });
+  }, [connected, hostActive, hostCameraActive, roomCode]);
+
+  // Automatic Same-Wi-Fi Scanner on Chromebook Driver while unpaired!
+  useEffect(() => {
+    if (subView !== "driver" || isRemoteDriverLive) {
+      scannerRef.current?.stop();
+      scannerRef.current = null;
+      return;
+    }
+    const scanner = new WifiTankScanner({
+      onTanksChange: (list) => setDiscoveredTanks(list),
+      onStatus: (st) => setDiscoveryStatus(st),
+    });
+    scannerRef.current = scanner;
+    void scanner.start();
+    return () => {
+      scanner.stop();
+      if (scannerRef.current === scanner) scannerRef.current = null;
+    };
+  }, [isRemoteDriverLive, subView]);
+
+  // Lazy-load AI Object Detector when toggled ON on Host
   useEffect(() => {
     if (!aiEnabled) {
       setAiStatusNote(null);
-      return;
-    }
-    if (demoMode) {
-      setAiStatusNote("Demo AI Object Recognition active (5 room landmarks)");
       return;
     }
     if (subView === "host" || hostCameraActive) {
@@ -406,9 +487,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         );
       });
     } else {
-      setAiStatusNote("AI Vision requested on Android Rover phone");
+      setAiStatusNote("AI Vision requested on Android Phone");
     }
-  }, [aiEnabled, demoMode, hostCameraActive, subView]);
+  }, [aiEnabled, hostCameraActive, subView]);
 
   // Reset Explorer FSM cleanly whenever switching into explorer or changing mission
   useEffect(() => {
@@ -417,7 +498,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, [assistMode, mission]);
 
-  // Sync PilotConfig to Android Rover Host whenever settings change while connected
+  // Sync PilotConfig to Android Phone Host whenever settings change while connected
   useEffect(() => {
     if (bridgeRef.current?.getRole() !== "driver-client" || !bridgeRef.current.isDataChannelOpen()) {
       return;
@@ -451,7 +532,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   }, []);
 
   const recordDiscovery = useCallback(
-    (label: string, confidence: number, sourceEl: HTMLVideoElement | HTMLCanvasElement | null) => {
+    (label: string, confidence: number, sourceEl: HTMLVideoElement | null) => {
       const pose = mapperRef.current.getPoseCm();
       const item: RoverDiscoveryItem = {
         id: `disc-${discoverySeqRef.current++}`,
@@ -482,12 +563,8 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, []);
 
-  // Sample HSV color target from either host video or demo canvas
   const handleTapSampleLocal = useCallback((normX: number, normY: number) => {
-    const sourceEl: HTMLVideoElement | HTMLCanvasElement | null =
-      hostVideoRef.current && hostStreamRef.current
-        ? hostVideoRef.current
-        : demoCanvasRef.current;
+    const sourceEl = hostVideoRef.current && hostStreamRef.current ? hostVideoRef.current : null;
     if (!sourceEl) return;
     const vc = visionCanvasRef.current ?? document.createElement("canvas");
     vc.width = VISION_W;
@@ -515,7 +592,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, []);
 
-  // Initialize singleton WebRTC bridge
+  // Initialize singleton WebRTC bridge (lives across station tab switches!)
   useEffect(() => {
     const bridge = new RoverWebRtcBridge({
       onStateChange: (st, detail) => {
@@ -557,6 +634,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           if (liveRef.current.assistMode === "explorer") {
             setAssistMode("copilot");
           }
+          explorerRef.current.reset();
           cbRef.current.onDrive(0, 0, 200);
           void cbRef.current.onStopMacro().catch(() => undefined);
           cbRef.current.onSynth(0, 0, 0);
@@ -613,7 +691,6 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               throttle: manualThrottle,
               at: Date.now(),
             };
-            // Manual stick immediately overrides Auto Explorer!
             if (movingManually && st.assistMode === "explorer") {
               setAssistMode("copilot");
             }
@@ -694,15 +771,22 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       },
     });
     bridgeRef.current = bridge;
+
+    // Auto-join immediately if launched with ?join=CODE link!
+    if (initParams.autoJoin && initParams.joinCode && !autoJoinedRef.current) {
+      autoJoinedRef.current = true;
+      void bridge.startDriver(initParams.joinCode).catch(() => undefined);
+    }
+
     return () => {
       bridge.stop();
       bridgeRef.current = null;
     };
-  }, [applyHostTorch, handleTapSampleLocal]);
+  }, [applyHostTorch, handleTapSampleLocal, initParams.autoJoin, initParams.joinCode]);
 
-  // Android Rover Host: 10 Hz Vision + 2D Room Mapping + Co-Pilot Pursuit + Auto Explorer Brain!
+  // Android Rover Host: 10 Hz Vision + 2D Room Mapping + Co-Pilot Pursuit + Smooth Continuous Auto Explorer!
   useEffect(() => {
-    if (!hostCameraActive) return;
+    if (!hostActive) return;
     const vc = visionCanvasRef.current ?? document.createElement("canvas");
     vc.width = VISION_W;
     vc.height = VISION_H;
@@ -713,39 +797,47 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     } catch {
       ctx = null;
     }
-    if (!ctx) return;
 
     const id = window.setInterval(() => {
       const video = hostVideoRef.current;
       const st = liveRef.current;
-      if (!video || video.readyState < 2) return;
-
-      ctx!.drawImage(video, 0, 0, VISION_W, VISION_H);
-      const img = ctx!.getImageData(0, 0, VISION_W, VISION_H);
-      const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H);
-      const flow = computeOpticalFlow(prevLumaRef.current, img.data, VISION_W, VISION_H);
-      prevLumaRef.current = flow.luma;
-      const laneOffset = st.laneAssist ? detectFloorLaneOffset(img.data, VISION_W, VISION_H) : null;
-
       const now = Date.now();
-      if (st.aiEnabled && aiDetectorRef.current.isReady() && now - lastAiRunRef.current >= 240) {
-        lastAiRunRef.current = now;
-        latestAiBoxesRef.current = aiDetectorRef.current.detectVideo(video, performance.now());
-      } else if (!st.aiEnabled) {
-        latestAiBoxesRef.current = [];
-      }
 
-      const objects: DetectedObjectBox[] = [...latestAiBoxesRef.current];
+      let corridors: [number, number, number, number, number] = [0.85, 0.85, 0.85, 0.85, 0.85];
+      let bestSteer = 0;
+      let flowForward = 0.5;
+      let laneOffset: number | null = null;
+      const objects: DetectedObjectBox[] = [];
       let lockedTarget: DetectedObjectBox | null = null;
 
-      if (hsvLockRef.current) {
-        const tracked = trackHsvTarget(img.data, VISION_W, VISION_H, hsvLockRef.current);
-        if (tracked) {
-          objects.push(tracked);
-          lockedTarget = tracked;
+      if (ctx && video && video.readyState >= 2) {
+        ctx.drawImage(video, 0, 0, VISION_W, VISION_H);
+        const img = ctx.getImageData(0, 0, VISION_W, VISION_H);
+        const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H);
+        const flow = computeOpticalFlow(prevLumaRef.current, img.data, VISION_W, VISION_H);
+        prevLumaRef.current = flow.luma;
+        corridors = floor.corridors;
+        bestSteer = floor.bestSteer;
+        flowForward = flow.flowForward;
+        laneOffset = st.laneAssist ? detectFloorLaneOffset(img.data, VISION_W, VISION_H) : null;
+
+        if (st.aiEnabled && aiDetectorRef.current.isReady() && now - lastAiRunRef.current >= 240) {
+          lastAiRunRef.current = now;
+          latestAiBoxesRef.current = aiDetectorRef.current.detectVideo(video, performance.now());
+        } else if (!st.aiEnabled) {
+          latestAiBoxesRef.current = [];
         }
-      } else if (lockedLabelRef.current) {
-        lockedTarget = objects.find((b) => b.label === lockedLabelRef.current) ?? null;
+
+        objects.push(...latestAiBoxesRef.current);
+        if (hsvLockRef.current) {
+          const tracked = trackHsvTarget(img.data, VISION_W, VISION_H, hsvLockRef.current);
+          if (tracked) {
+            objects.push(tracked);
+            lockedTarget = tracked;
+          }
+        } else if (lockedLabelRef.current) {
+          lockedTarget = objects.find((b) => b.label === lockedLabelRef.current) ?? null;
+        }
       }
 
       // Update live 2D Occupancy Room Map
@@ -754,7 +846,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         encB: st.telemetry?.encB ?? 0,
         gyroHeadingDeg: st.phoneHeadingDeg,
         frontDistancePct: st.distancePct,
-        corridors: floor.corridors,
+        corridors,
       });
 
       const driverIdle = now - hostDriverInputRef.current.at > 280;
@@ -776,9 +868,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           safeMode: st.safeMode,
           bump: Boolean(st.telemetry && (st.telemetry.flags & TelemetryFlag.BUMP)),
           frontDistancePct: st.distancePct,
-          corridors: floor.corridors,
-          bestSteer: floor.bestSteer,
-          flowForward: flow.flowForward,
+          corridors,
+          bestSteer,
+          flowForward,
           encA: st.telemetry?.encA ?? 0,
           encB: st.telemetry?.encB ?? 0,
           objects,
@@ -795,8 +887,13 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         setAssistNote(expRes.statusNote);
         setAssistIntervening(interveningOut);
         setRecoveries(expRes.recoveries);
-        cbRef.current.onDrive(expRes.left, expRes.right, 380);
-        if (expRes.synthSfx) cbRef.current.onSynth(0, expRes.synthSfx, 0);
+
+        // 750ms watchdog timeout prevents jerky Move Hub motor stops on any camera/AI frame hiccup!
+        // Only play synth when actually stopped (e.g. MISSION_COMPLETE) so motor coils never stutter!
+        cbRef.current.onDrive(expRes.left, expRes.right, 750);
+        if (expRes.synthSfx && expRes.left === 0 && expRes.right === 0) {
+          cbRef.current.onSynth(0, expRes.synthSfx, 0);
+        }
         if (expRes.discovery) {
           recordDiscovery(expRes.discovery.label, expRes.discovery.confidence, video);
         }
@@ -806,7 +903,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           rawThrottle: 0,
           speedCap: st.speedCap,
           frontDistancePct: st.distancePct,
-          corridors: floor.corridors,
+          corridors,
           pickedUp: st.pickedUp,
           safeMode: st.safeMode,
           headingDeg: st.phoneHeadingDeg,
@@ -824,13 +921,13 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         hostInterveningRef.current = interveningOut;
         setAssistNote(res.statusNote);
         setAssistIntervening(res.intervening);
-        cbRef.current.onDrive(res.left, res.right, 350);
+        cbRef.current.onDrive(res.left, res.right, 550);
       }
 
       const snapshot: RoverVisionSnapshot = {
-        corridors: floor.corridors,
-        bestSteer: floor.bestSteer,
-        flowForward: flow.flowForward,
+        corridors,
+        bestSteer,
+        flowForward,
         stuck: stuckNow,
         laneOffset,
         lockedTarget,
@@ -871,7 +968,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }, 100);
 
     return () => window.clearInterval(id);
-  }, [hostCameraActive, recordDiscovery]);
+  }, [hostActive, recordDiscovery]);
 
   // Driver Client: 1 Hz RTT ping monitor
   useEffect(() => {
@@ -884,7 +981,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   // Android Phone Gyroscope orientation listener while hosting
   useEffect(() => {
-    if (!hostCameraActive) return;
+    if (!hostActive) return;
     const onOrient = (ev: DeviceOrientationEvent) => {
       if (typeof ev.alpha === "number" && Number.isFinite(ev.alpha)) {
         setPhoneHeadingDeg(Math.round((360 - ev.alpha) % 360));
@@ -892,16 +989,20 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     };
     window.addEventListener("deviceorientation", onOrient);
     return () => window.removeEventListener("deviceorientation", onOrient);
-  }, [hostCameraActive]);
+  }, [hostActive]);
 
   const stopHostCamera = useCallback(() => {
+    advertiserRef.current?.stop();
+    advertiserRef.current = null;
     bridgeRef.current?.stop();
     const s = hostStreamRef.current;
     hostStreamRef.current = null;
     if (s) s.getTracks().forEach((t) => t.stop());
     if (hostVideoRef.current) hostVideoRef.current.srcObject = null;
+    setHostActive(false);
     setHostCameraActive(false);
     setHostTorchSupported(false);
+    setHostDiscoveryNote("Auto-discovery activates once you start hosting");
     if (wakeLockRef.current) {
       void wakeLockRef.current.release().catch(() => undefined);
       wakeLockRef.current = null;
@@ -911,51 +1012,65 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
 
   const startHostCameraAndBroadcast = useCallback(async () => {
     setHostCameraError(null);
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setHostCameraError("Camera API unavailable in this browser.");
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 24, max: 30 },
-        },
-        audio: false,
-      });
-      hostStreamRef.current = stream;
-      if (hostVideoRef.current) {
-        hostVideoRef.current.srcObject = stream;
-        await hostVideoRef.current.play().catch(() => undefined);
-      }
-      setHostCameraActive(true);
-
-      const track = stream.getVideoTracks()[0];
-      const caps = track?.getCapabilities ? (track.getCapabilities() as { torch?: boolean }) : {};
-      setHostTorchSupported(Boolean(caps.torch));
-
-      const navWithWake = navigator as unknown as {
-        wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
-      };
-      if (navWithWake.wakeLock) {
-        try {
-          wakeLockRef.current = await navWithWake.wakeLock.request("screen");
-          setHostWakeLocked(true);
-        } catch {
-          setHostWakeLocked(false);
+    let stream: MediaStream | null = null;
+    if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 24, max: 30 },
+          },
+          audio: false,
+        });
+        hostStreamRef.current = stream;
+        if (hostVideoRef.current) {
+          hostVideoRef.current.srcObject = stream;
+          await hostVideoRef.current.play().catch(() => undefined);
         }
+        setHostCameraActive(true);
+        const track = stream.getVideoTracks()[0];
+        const caps = track?.getCapabilities ? (track.getCapabilities() as { torch?: boolean }) : {};
+        setHostTorchSupported(Boolean(caps.torch));
+      } catch (err) {
+        setHostCameraError(
+          `Camera note: ${err instanceof Error ? err.message : String(err)} — continuing Wi-Fi control link.`
+        );
       }
+    }
 
+    const navWithWake = navigator as unknown as {
+      wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
+    };
+    if (navWithWake.wakeLock) {
+      try {
+        wakeLockRef.current = await navWithWake.wakeLock.request("screen");
+        setHostWakeLocked(true);
+      } catch {
+        setHostWakeLocked(false);
+      }
+    }
+
+    try {
       await bridgeRef.current?.startHost(roomCode, stream);
+      setHostActive(true);
+
+      // Start Same-Wi-Fi Auto-Discovery advertiser so Chromebook finds this tank in ~1s!
+      const adv = new WifiTankAdvertiser((st) => setHostDiscoveryNote(st));
+      advertiserRef.current = adv;
+      void adv.start({
+        code: roomCode,
+        bleConnected: liveRef.current.connected,
+        cameraReady: Boolean(stream),
+      });
     } catch (err) {
       setHostCameraError(err instanceof Error ? err.message : String(err));
     }
   }, [roomCode]);
 
-  const handleJoinAsDriver = async () => {
-    const code = normalizeRoomCode(joinCode);
+  const handleJoinCode = useCallback(async (rawCode: string) => {
+    const code = normalizeRoomCode(rawCode);
     if (!code) return;
     setJoinCode(code);
     try {
@@ -963,14 +1078,12 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     } catch {
       // Status shown in linkDetail
     }
-  };
+  }, []);
 
-  const isRemoteDriverLive =
-    linkState === "connected" && bridgeRef.current?.getRole() === "driver-client";
   const fpvCanDrive = (isRemoteDriverLive && remoteBleOk) || (connected && !disabled);
 
   const sendFpvDrive = useCallback(
-    (left: number, right: number, steer = 0, throttle = 0, timeoutMs = 400) => {
+    (left: number, right: number, steer = 0, throttle = 0, timeoutMs = 450) => {
       if (bridgeRef.current?.getRole() === "driver-client" && bridgeRef.current.isDataChannelOpen()) {
         bridgeRef.current.sendToRover({
           type: "drive",
@@ -1011,6 +1124,15 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, []);
 
+  // Honor global TopConsoleBar Emergency STOP over Wi-Fi too!
+  const lastStopSeqRef = useRef(emergencyStopSeq);
+  useEffect(() => {
+    if (emergencyStopSeq !== lastStopSeqRef.current) {
+      lastStopSeqRef.current = emergencyStopSeq;
+      sendFpvStop();
+    }
+  }, [emergencyStopSeq, sendFpvStop]);
+
   const toggleHeadlights = useCallback(() => {
     const next = !liveRef.current.headlightsOn;
     if (bridgeRef.current?.getRole() === "driver-client" && bridgeRef.current.isDataChannelOpen()) {
@@ -1045,7 +1167,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   }, []);
 
   const handleViewportClick = (ev: React.MouseEvent<HTMLDivElement>) => {
-    if (!hasRemoteVideo && !demoMode) return;
+    if (!hasRemoteVideo) return;
     const rect = ev.currentTarget.getBoundingClientRect();
     const normX = Math.max(0.05, Math.min(0.95, (ev.clientX - rect.left) / rect.width));
     const normY = Math.max(0.05, Math.min(0.95, (ev.clientY - rect.top) / rect.height));
@@ -1058,9 +1180,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   };
 
-  // Keyboard WASD/Arrows + Space STOP inside FPV Driver view
+  // Keyboard WASD/Arrows + Space STOP inside FPV Driver view (only when tab is active)
   useEffect(() => {
-    if (subView !== "driver") return;
+    if (!isActiveTab || subView !== "driver") return;
     const isEditable = (target: EventTarget | null) =>
       target instanceof HTMLElement &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
@@ -1089,11 +1211,11 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [sendFpvStop, subView]);
+  }, [isActiveTab, sendFpvStop, subView]);
 
-  // 16 Hz FPV Xbox + WASD + Touch + Smart Co-Pilot + Local Demo Auto-Explorer Drive Loop!
+  // 16 Hz FPV Xbox + WASD + Touch Drive Loop (paused while immersive Quest VR session owns hand controllers)
   useEffect(() => {
-    if (subView !== "driver") return;
+    if (!isActiveTab || subView !== "driver" || vrActive) return;
     const id = window.setInterval(() => {
       const sample = xboxRef.current.poll();
       setXboxSample((prev) =>
@@ -1117,7 +1239,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           );
         }
         if (act === "toggle-follow") {
-          const vis = latestVisionRef.current;
+          const vis = isRemoteDriverLive ? remoteVision : latestVisionRef.current;
           if (lockedLabelRef.current) {
             selectOrToggleObject(null);
           } else if (vis && vis.objects.length > 0) {
@@ -1182,84 +1304,17 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         setAssistMode("copilot");
       }
 
-      let outLeft = 0;
-      let outRight = 0;
-      let effSteer = rawSteer;
-      let effThrottle = rawThrottle;
+      const mixed =
+        sample.connected && !touchDraggingRef.current && keysRef.current.size === 0
+          ? mixXboxToTank(rawSteer, rawThrottle, st.speedCap)
+          : mixArcadeToTank(rawSteer, rawThrottle, st.speedCap);
 
-      if (!isRemoteDriverLive && st.assistMode === "explorer" && !manualActive) {
-        const vis = latestVisionRef.current;
-        const expRes = explorerRef.current.step({
-          nowMs: Date.now(),
-          mission: st.mission,
-          speedCap: st.speedCap,
-          pickedUp: st.pickedUp,
-          safeMode: st.safeMode,
-          bump: Boolean(st.telemetry && (st.telemetry.flags & TelemetryFlag.BUMP)),
-          frontDistancePct: st.distancePct,
-          corridors: vis?.corridors ?? [0.7, 0.7, 0.7, 0.7, 0.7],
-          bestSteer: vis?.bestSteer ?? 0,
-          flowForward: vis?.flowForward ?? 0.5,
-          encA: st.telemetry?.encA ?? 0,
-          encB: st.telemetry?.encB ?? 0,
-          objects: vis?.objects ?? [],
-          mapper: mapperRef.current,
-        });
-        outLeft = expRes.left;
-        outRight = expRes.right;
-        effSteer = expRes.steer;
-        effThrottle = expRes.throttle;
-        setExplorerState(expRes.state);
-        setAssistNote(expRes.statusNote);
-        setRecoveries(expRes.recoveries);
-        setAssistIntervening(
-          expRes.state === "AVOIDING" || expRes.state === "UNSTICKING" ? "dodging" : "none"
-        );
-        if (expRes.synthSfx) cbRef.current.onSynth(0, expRes.synthSfx, 0);
-        if (expRes.discovery) {
-          recordDiscovery(expRes.discovery.label, expRes.discovery.confidence, demoCanvasRef.current);
-        }
-      } else if (!isRemoteDriverLive && st.assistMode === "copilot") {
-        const vis = latestVisionRef.current;
-        const res = driveCtrlRef.current.step({
-          rawSteer,
-          rawThrottle,
-          speedCap: st.speedCap,
-          frontDistancePct: st.distancePct,
-          corridors: vis?.corridors ?? [0.8, 0.8, 0.8, 0.8, 0.8],
-          pickedUp: st.pickedUp,
-          safeMode: st.safeMode,
-          headingDeg: st.demoMode ? st.headingDeg : st.phoneHeadingDeg,
-          encA: st.telemetry?.encA ?? 0,
-          encB: st.telemetry?.encB ?? 0,
-          collisionGuard: st.collisionGuard,
-          headingHold: st.headingHold,
-          laneAssist: st.laneAssist,
-          laneOffset: vis?.laneOffset ?? null,
-          lockedTarget: vis?.lockedTarget ?? null,
-        });
-        outLeft = res.left;
-        outRight = res.right;
-        effSteer = res.effectiveSteer;
-        effThrottle = res.effectiveThrottle;
-        setAssistNote(res.statusNote);
-        setAssistIntervening(res.intervening);
-      } else {
-        const mixed =
-          sample.connected && !touchDraggingRef.current && keysRef.current.size === 0
-            ? mixXboxToTank(rawSteer, rawThrottle, st.speedCap)
-            : mixArcadeToTank(rawSteer, rawThrottle, st.speedCap);
-        outLeft = mixed.left;
-        outRight = mixed.right;
-        setAssistIntervening("none");
-      }
+      setSteerVis(rawSteer);
+      setThrottleVis(rawThrottle);
 
-      setSteerVis(effSteer);
-      setThrottleVis(effThrottle);
-
-      if (outLeft !== 0 || outRight !== 0) {
+      if (mixed.left !== 0 || mixed.right !== 0) {
         wasDrivingRef.current = true;
-        sendFpvDrive(outLeft, outRight, rawSteer, rawThrottle, 400);
+        sendFpvDrive(mixed.left, mixed.right, rawSteer, rawThrottle, 450);
       } else if (wasDrivingRef.current) {
         wasDrivingRef.current = false;
         sendFpvDrive(0, 0, 0, 0, 200);
@@ -1269,117 +1324,17 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     return () => window.clearInterval(id);
   }, [
     fpvCanDrive,
+    isActiveTab,
     isRemoteDriverLive,
-    recordDiscovery,
+    remoteVision,
     selectOrToggleObject,
     sendFpvDrive,
     sendFpvStop,
     sendHorn,
     subView,
     toggleHeadlights,
+    vrActive,
   ]);
-
-  // Procedural 3D-perspective Demo FPV Rover Canvas + Real Pixel Vision + Live 2D Room Map!
-  useEffect(() => {
-    if (subView !== "driver" || !demoMode || hasRemoteVideo) return;
-    const canvas = demoCanvasRef.current;
-    if (!canvas) return;
-    let ctx: CanvasRenderingContext2D | null = null;
-    try {
-      ctx = canvas.getContext("2d", { willReadFrequently: true });
-    } catch {
-      ctx = null;
-    }
-    if (!ctx) return;
-
-    const vc = visionCanvasRef.current ?? document.createElement("canvas");
-    vc.width = VISION_W;
-    vc.height = VISION_H;
-    visionCanvasRef.current = vc;
-    let vCtx: CanvasRenderingContext2D | null = null;
-    try {
-      vCtx = vc.getContext("2d", { willReadFrequently: true });
-    } catch {
-      vCtx = null;
-    }
-
-    const id = window.setInterval(() => {
-      const st = liveRef.current;
-      const res = renderVirtualRoverCamera(
-        ctx!,
-        canvas.width,
-        canvas.height,
-        st.floorX,
-        st.floorY,
-        st.headingDeg,
-        st.headlightsOn
-      );
-      cbRef.current.onSimulatedDistance?.(res.frontDistancePct);
-
-      let corridors = res.trueCorridors;
-      let bestSteer = 0;
-      let flowForward = 0;
-      let laneOffset: number | null = null;
-      const objects: DetectedObjectBox[] = [...res.visibleObjects];
-      let lockedTarget: DetectedObjectBox | null = null;
-
-      if (vCtx) {
-        vCtx.drawImage(canvas, 0, 0, VISION_W, VISION_H);
-        const img = vCtx.getImageData(0, 0, VISION_W, VISION_H);
-        const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H);
-        corridors = res.trueCorridors.map((g, i) =>
-          Number((g * 0.55 + floor.corridors[i] * 0.45).toFixed(2))
-        ) as [number, number, number, number, number];
-        bestSteer = floor.bestSteer;
-        const flow = computeOpticalFlow(prevLumaRef.current, img.data, VISION_W, VISION_H);
-        prevLumaRef.current = flow.luma;
-        flowForward = flow.flowForward;
-        laneOffset = st.laneAssist ? detectFloorLaneOffset(img.data, VISION_W, VISION_H) : null;
-
-        if (hsvLockRef.current) {
-          const tracked = trackHsvTarget(img.data, VISION_W, VISION_H, hsvLockRef.current);
-          if (tracked) {
-            objects.push(tracked);
-            lockedTarget = tracked;
-          }
-        }
-      }
-
-      if (!lockedTarget && lockedLabelRef.current) {
-        lockedTarget = objects.find((b) => b.label === lockedLabelRef.current) ?? null;
-      }
-
-      // Feed Demo Rover pose into live 2D Occupancy Room Mapper!
-      mapperRef.current.update({
-        encA: st.telemetry?.encA ?? 0,
-        encB: st.telemetry?.encB ?? 0,
-        gyroHeadingDeg: st.headingDeg,
-        frontDistancePct: res.frontDistancePct,
-        corridors,
-        explicitPoseCm: { x: st.floorX, y: st.floorY, headingDeg: st.headingDeg },
-      });
-
-      const now = Date.now();
-      if (now - lastMapPushRef.current >= 220) {
-        lastMapPushRef.current = now;
-        setLocalMap(mapperRef.current.getSnapshot());
-      }
-
-      const snap: RoverVisionSnapshot = {
-        corridors,
-        bestSteer,
-        flowForward,
-        stuck: false,
-        laneOffset,
-        lockedTarget,
-        objects,
-        aiReady: st.aiEnabled,
-      };
-      latestVisionRef.current = snap;
-      setLocalVision(snap);
-    }, 80);
-    return () => window.clearInterval(id);
-  }, [demoMode, hasRemoteVideo, subView]);
 
   // Voice Commander handlers
   const speak = useCallback((text: string | null) => {
@@ -1497,7 +1452,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           intent: parsed.intent,
           reply:
             parsed.reply ??
-            (st.connected || isRemoteDriverLive ? "Done!" : "Understood (connect robot or launch Demo)."),
+            (st.connected || isRemoteDriverLive ? "Done!" : "Understood (connect robot or pair over Wi-Fi first)."),
           blocked: parsed.blockedBySafety,
         },
         ...prev.slice(0, 7),
@@ -1552,15 +1507,39 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, [handleTranscript, stopListening]);
 
+  // Detect Meta Quest / WebXR immersive-vr support on mount
+  useEffect(() => {
+    let alive = true;
+    void checkWebXrVrSupported().then((ok) => {
+      if (alive) setXrVrSupported(ok);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Global teardown on unmount
   useEffect(() => {
     return () => {
-      if (wasDrivingRef.current) sendFpvStop();
+      if (wasDrivingRef.current || vrWasDrivingRef.current) sendFpvStop();
+      void vrSessionRef.current?.stop();
+      scannerRef.current?.stop();
       stopHostCamera();
       stopListening();
       aiDetectorRef.current.dispose();
     };
   }, [sendFpvStop, stopHostCamera, stopListening]);
+
+  const handleCopyJoinLink = () => {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.origin}${window.location.pathname}?join=${roomCode}`;
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(url).then(() => {
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2000);
+      });
+    }
+  };
 
   const hudTelemetry = isRemoteDriverLive ? remoteTelemetry : telemetry;
   const hudVision = isRemoteDriverLive ? remoteVision : localVision;
@@ -1574,16 +1553,175 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const hudBattPct = hudTelemetry
     ? Math.max(0, Math.min(100, Math.round(((hudTelemetry.batteryMv - 6000) / 3000) * 100)))
     : null;
-  const hudHeading = isRemoteDriverLive
-    ? remoteHeading
-    : demoMode
-      ? Math.round(headingDeg)
-      : phoneHeadingDeg;
+  const hudHeading = isRemoteDriverLive ? remoteHeading : phoneHeadingDeg;
   const hudSafe = Boolean(hudTelemetry && (hudTelemetry.flags & TelemetryFlag.SAFE_MODE));
   const activeAssistStatus = isRemoteDriverLive && remoteAssistNote ? remoteAssistNote : assistNote;
   const activeAssistIntervening = isRemoteDriverLive ? remoteAssistIntervening : assistIntervening;
   const activeExplorerBadge =
     isRemoteDriverLive && remoteExplorerState ? remoteExplorerState : explorerState;
+
+  // Keep live VR HUD snapshot fresh for 10 Hz WebXR dashboard canvas rendering
+  vrHudRef.current = {
+    videoConnected: hasRemoteVideo,
+    bleConnected: isRemoteDriverLive ? remoteBleOk : connected,
+    assistMode,
+    explorerState: activeExplorerBadge,
+    assistIntervening: activeAssistIntervening,
+    assistNote: activeAssistStatus,
+    driveStyle: "arcade",
+    speedCap,
+    leftMotor: vrMotorsRef.current.left,
+    rightMotor: vrMotorsRef.current.right,
+    steer: vrMotorsRef.current.steer,
+    frontDistPct: hudDist,
+    batteryPct: hudBattPct,
+    headingDeg: hudHeading,
+    headlightsOn,
+    pingMs,
+    vision: hudVision,
+    map: hudMap,
+  };
+
+  // Tactile Oculus Touch haptic feedback when Collision Guard brakes or dodges!
+  useEffect(() => {
+    if (
+      vrActive &&
+      (activeAssistIntervening === "braking" || activeAssistIntervening === "dodging") &&
+      lastVrInterveningRef.current !== activeAssistIntervening
+    ) {
+      vrSessionRef.current?.pulseHaptics(
+        "both",
+        activeAssistIntervening === "braking" ? 0.65 : 0.35,
+        activeAssistIntervening === "braking" ? 90 : 50
+      );
+    }
+    lastVrInterveningRef.current = activeAssistIntervening;
+  }, [activeAssistIntervening, vrActive]);
+
+  const handleVrControlFrame = useCallback(
+    (sample: QuestControlSample) => {
+      for (const act of sample.actions) {
+        if (act === "stop") {
+          vrWasDrivingRef.current = false;
+          vrMotorsRef.current = { left: 0, right: 0, steer: 0 };
+          sendFpvStop();
+          return;
+        }
+        if (act === "horn") sendHorn();
+        if (act === "headlights") toggleHeadlights();
+        if (act === "cycle-assist") {
+          setAssistMode((m) =>
+            m === "manual" ? "copilot" : m === "copilot" ? "explorer" : "manual"
+          );
+        }
+        if (act === "speed-down") {
+          setSpeedCap((c) => {
+            const idx = SPEED_STEPS.findIndex((v) => v >= c);
+            return SPEED_STEPS[Math.max(0, idx <= 0 ? 0 : idx - 1)];
+          });
+        }
+        if (act === "speed-up") {
+          setSpeedCap((c) => {
+            const idx = SPEED_STEPS.findIndex((v) => v >= c);
+            return SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, idx + 1)];
+          });
+        }
+      }
+
+      const moving = Math.abs(sample.leftMotor) > 0 || Math.abs(sample.rightMotor) > 0;
+      vrMotorsRef.current = {
+        left: sample.leftMotor,
+        right: sample.rightMotor,
+        steer: sample.steer,
+      };
+
+      if (moving && liveRef.current.assistMode === "explorer") {
+        setAssistMode("copilot");
+      }
+
+      if (Math.abs(sample.turretX) > 0.15) {
+        const targetDeg = Math.max(-35, Math.min(35, Math.round(sample.turretX * 35)));
+        if (Math.abs(targetDeg - liveRef.current.headDeg) >= 3) {
+          if (bridgeRef.current?.getRole() === "driver-client" && bridgeRef.current.isDataChannelOpen()) {
+            bridgeRef.current.sendToRover({ type: "turret", angleDeg: targetDeg });
+          } else if (liveRef.current.headHomed) {
+            cbRef.current.onHead(targetDeg, 55, true);
+          }
+        }
+      }
+
+      if (moving) {
+        vrWasDrivingRef.current = true;
+        sendFpvDrive(sample.leftMotor, sample.rightMotor, sample.steer, sample.throttle, 450);
+      } else if (vrWasDrivingRef.current) {
+        vrWasDrivingRef.current = false;
+        sendFpvDrive(0, 0, 0, 0, 200);
+      }
+    },
+    [sendFpvDrive, sendFpvStop, sendHorn, toggleHeadlights]
+  );
+
+  const handleToggleVrCockpit = useCallback(async () => {
+    setVrError(null);
+    if (vrActive && vrSessionRef.current) {
+      await vrSessionRef.current.stop();
+      setVrActive(false);
+      sendFpvStop();
+      return;
+    }
+
+    // Ensure remote video is actively playing inside user gesture (important on Quest Browser!)
+    if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
+      void remoteVideoRef.current.play().catch(() => undefined);
+    }
+
+    const session = new QuestVrCockpitSession();
+    vrSessionRef.current = session;
+    try {
+      await session.start({
+        getVideoElement: () => remoteVideoRef.current,
+        getHudState: () =>
+          vrHudRef.current ?? {
+            videoConnected: false,
+            bleConnected: false,
+            assistMode: "copilot",
+            explorerState: "IDLE",
+            assistIntervening: "none",
+            assistNote: "Ready",
+            driveStyle: "arcade",
+            speedCap: 65,
+            leftMotor: 0,
+            rightMotor: 0,
+            steer: 0,
+            frontDistPct: null,
+            batteryPct: null,
+            headingDeg: null,
+            headlightsOn: false,
+            pingMs: null,
+            vision: null,
+            map: null,
+          },
+        onControlFrame: handleVrControlFrame,
+        onSessionEnd: () => {
+          vrSessionRef.current = null;
+          vrWasDrivingRef.current = false;
+          vrMotorsRef.current = { left: 0, right: 0, steer: 0 };
+          setVrActive(false);
+          sendFpvStop();
+        },
+        onError: (msg) => setVrError(msg),
+      });
+      setVrActive(true);
+    } catch (err) {
+      vrSessionRef.current = null;
+      setVrActive(false);
+      setVrError(
+        err instanceof Error
+          ? err.message
+          : "Could not start Meta Quest VR session. Open this page in Meta Quest Browser over HTTPS."
+      );
+    }
+  }, [handleVrControlFrame, sendFpvStop, vrActive]);
 
   const updateTouchStick = (clientX: number, clientY: number) => {
     const el = touchPadRef.current;
@@ -1601,7 +1739,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   };
 
   return (
-    <div className="station-stack">
+    <div className="station-stack" hidden={!isActiveTab}>
       {/* Top Role Switcher */}
       <div className="fpv-role-bar">
         <div className="segmented-mini" role="tablist" aria-label="Rover camera role">
@@ -1613,7 +1751,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
             className={subView === "driver" ? "is-active" : ""}
             onClick={() => setSubView("driver")}
           >
-            Chromebook FPV Driver
+            Driver / Quest VR
           </button>
           <button
             type="button"
@@ -1642,23 +1780,65 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           <span>
             {linkState === "connected"
               ? `Wi-Fi FPV Live${pingMs ? ` · ${pingMs} ms` : ""}`
-              : demoMode
-                ? "Simulated 3D Rover Camera"
-                : linkDetail}
+              : linkDetail}
           </span>
         </div>
       </div>
 
       {/* =========================================
-          VIEW 1: CHROMEBOOK FPV DRIVER COCKPIT
+          VIEW 1: CHROMEBOOK / META QUEST VR DRIVER COCKPIT
          ========================================= */}
       {subView === "driver" && (
         <div className="station-stack">
           <section className="console-panel fpv-cockpit-panel" aria-label="FPV Rover Driver Cockpit">
-            {/* Wi-Fi Room Code Pairing Strip */}
+            {/* ZERO-IP AUTOMATIC SAME-WI-FI DISCOVERY BANNER */}
+            {!isRemoteDriverLive && (
+              <div className="wifi-discovery-panel" aria-label="Automatic Wi-Fi tank discovery">
+                <div className="wifi-discovery-head">
+                  <div>
+                    <span className="engraved-label">Automatic Wi-Fi Discovery · No IP Address Needed</span>
+                    <p className="wifi-discovery-sub">{discoveryStatus}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="chip-btn chip-compact"
+                    onClick={() => scannerRef.current?.probe()}
+                  >
+                    <IconRefresh size={13} />
+                    <span>Rescan Wi-Fi</span>
+                  </button>
+                </div>
+
+                {discoveredTanks.length > 0 && (
+                  <div className="discovered-tank-list">
+                    {discoveredTanks.map((tank) => (
+                      <div key={tank.code} className="discovered-tank-card">
+                        <div>
+                          <strong>{tank.name}</strong>
+                          <span className="mono-readout-muted">
+                            Room {tank.code} · {tank.bleConnected ? "Bluetooth Ready" : "Connect Bluetooth on Phone"} ·{" "}
+                            {tank.cameraReady ? "Camera Live" : "Control Only"}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="keycap keycap-green keycap-sm"
+                          onClick={() => void handleJoinCode(tank.code)}
+                        >
+                          <IconWifi size={14} />
+                          <span>Connect Now</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 4-Character Room Code Backup + Quest VR Launch + Disconnect Strip */}
             <div className="fpv-pair-strip">
               <div className="fpv-pair-left">
-                <span className="engraved-label">Pair with Android Phone on Tank</span>
+                <span className="engraved-label">Or Pair With 4-Letter Room Code</span>
                 <div className="fpv-code-form">
                   <input
                     id="input-join-code"
@@ -1684,24 +1864,25 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                       id="btn-join-rover"
                       className="keycap keycap-green keycap-sm"
                       disabled={joinCode.length < 3}
-                      onClick={() => void handleJoinAsDriver()}
+                      onClick={() => void handleJoinCode(joinCode)}
                     >
                       <IconWifi size={14} />
-                      <span>Connect to Tank</span>
+                      <span>Connect by Code</span>
                     </button>
                   )}
                 </div>
               </div>
 
               <div className="action-cluster">
-                {!demoMode && !isRemoteDriverLive && (
+                {(xrVrSupported || isQuestBrowser) && (
                   <button
                     type="button"
-                    id="btn-fpv-demo"
-                    className="keycap keycap-amber keycap-sm"
-                    onClick={onLaunchDemo}
+                    id="btn-enter-vr-cockpit"
+                    className={`keycap keycap-sm ${vrActive ? "keycap-stop" : "keycap-orange"}`}
+                    onClick={() => void handleToggleVrCockpit()}
                   >
-                    Try Demo FPV Rover
+                    <IconVrHeadset size={15} />
+                    <span>{vrActive ? "Exit VR Cockpit" : "Enter VR Cockpit (Quest)"}</span>
                   </button>
                 )}
                 <button
@@ -1709,14 +1890,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   className="chip-btn"
                   onClick={() => setShowOfflineFallback((v) => !v)}
                 >
-                  {showOfflineFallback ? "Hide Offline Pairing" : "Offline Direct Pair"}
+                  {showOfflineFallback ? "Hide Manual Copy/Paste" : "Offline Copy/Paste Pair"}
                 </button>
               </div>
             </div>
 
+            {vrError && <div className="notice notice-danger">{vrError}</div>}
+
             {showOfflineFallback && (
               <div className="offline-pair-box">
-                <span className="engraved-label">Zero-Server LAN Pairing (Copy/Paste Offer &amp; Answer)</span>
+                <span className="engraved-label">Zero-Internet Direct Pairing (Copy/Paste Offer &amp; Answer)</span>
                 <div className="two-col-grid">
                   <div className="field-stack">
                     <textarea
@@ -1771,33 +1954,39 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                 autoPlay
               />
 
-              {demoMode && !hasRemoteVideo && (
-                <canvas
-                  ref={demoCanvasRef}
-                  width={640}
-                  height={360}
-                  className="fpv-media"
-                  aria-label="Simulated 3D FPV rover camera"
-                />
-              )}
-
-              {!hasRemoteVideo && !demoMode && (
+              {!hasRemoteVideo && (
                 <div className="fpv-standby">
-                  <IconCamera size={36} />
-                  <h3>Ready for First-Person Tank Driving</h3>
-                  <p>
-                    Open Vernie Pilot on your spare Android phone, switch to{" "}
-                    <strong>Android Phone on Tank</strong>, and enter its 4-character Room Code
-                    above — or click <strong>Try Demo FPV Rover</strong> to test Xbox driving, Smart
-                    Co-Pilot &amp; Autonomous Exploration right now.
-                  </p>
-                  <button type="button" className="keycap keycap-amber" onClick={onLaunchDemo}>
-                    Launch Demo FPV Rover
-                  </button>
+                  <IconCamera size={34} />
+                  <h3>Pair Your Android Phone with Chromebook or Meta Quest (No IP Address Needed)</h3>
+                  <div className="wifi-steps-grid">
+                    <div className="wifi-step-card">
+                      <span className="wifi-step-num">1</span>
+                      <div>
+                        <strong>On your Android Phone (mounted on tank)</strong>
+                        <p>
+                          Open this page on the same Wi-Fi, select <strong>Android Phone on Tank</strong>,
+                          tap <strong>Connect Robot</strong> (Bluetooth), then tap{" "}
+                          <strong>Start Camera &amp; Broadcast on Wi-Fi</strong>.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="wifi-step-card">
+                      <span className="wifi-step-num">2</span>
+                      <div>
+                        <strong>On your Chromebook or Meta Quest Headset</strong>
+                        <p>
+                          Your tank appears automatically in the green box above within ~1 second —
+                          click <strong>Connect Now</strong> (or enter the 4-letter code). On{" "}
+                          <strong>Meta Quest</strong>, tap <strong>Enter VR Cockpit</strong> to drive
+                          immersively with your Touch hand controllers!
+                        </p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {(hasRemoteVideo || demoMode) && (
+              {hasRemoteVideo && (
                 <FpvOverlaySvg
                   steer={steerVis}
                   frontDistPct={hudDist}
@@ -1846,9 +2035,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   {hudDist !== null && (
                     <span
                       className={`visor-chip ${
-                        hudDist <= 30
+                        hudDist <= 22
                           ? "visor-chip-red"
-                          : hudDist <= 55
+                          : hudDist <= 50
                             ? "visor-chip-amber"
                             : "visor-chip-green"
                       }`}
@@ -1862,7 +2051,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               </div>
 
               {/* Floating touch pad overlay */}
-              {showTouchPad && (hasRemoteVideo || demoMode) && (
+              {showTouchPad && hasRemoteVideo && (
                 <div
                   ref={touchPadRef}
                   className="fpv-floating-stick"
@@ -1917,6 +2106,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   >
                     {showTouchPad ? "Hide Stick" : "Touch Stick"}
                   </button>
+                  {(xrVrSupported || isQuestBrowser) && (
+                    <button
+                      type="button"
+                      className={`fpv-pill-btn ${vrActive ? "is-lit" : ""}`}
+                      onClick={() => void handleToggleVrCockpit()}
+                    >
+                      <IconVrHeadset size={14} />
+                      <span>{vrActive ? "Exit VR" : "VR Cockpit"}</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="fpv-dock-group">
@@ -2061,11 +2260,54 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               </div>
             </div>
 
-            <XboxHudStrip sample={xboxSample} />
+            {!isQuestBrowser && <XboxHudStrip sample={xboxSample} />}
+
+            {(xrVrSupported || isQuestBrowser) && (
+              <div
+                className={`xbox-hud ${vrActive ? "is-connected" : ""}`}
+                aria-label="Meta Quest Touch hand controller guide"
+              >
+                <div className="xbox-hud-left">
+                  <span className={`xbox-status-dot ${vrActive ? "is-live" : ""}`} />
+                  <IconVrHeadset size={16} />
+                  <span className="xbox-title">
+                    {vrActive
+                      ? "Quest VR Cockpit Active — Touch Hand Controllers Live"
+                      : "Meta Quest Touch Hand Controllers Ready"}
+                  </span>
+                </div>
+                <div className="xbox-legend" aria-label="Quest Touch button mapping">
+                  <span className="xbox-key">
+                    <kbd className="xbtn-neutral">L-Stick / RT·LT</kbd> Drive
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-b">R-B</kbd> Stop
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-a">R-A</kbd> Horn
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-x">L-X</kbd> Lights
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-y">L-Y</kbd> Mode
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-neutral">L·R Grips</kbd> Speed
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-neutral">L-Click</kbd> Tank Mode
+                  </span>
+                  <span className="xbox-key">
+                    <kbd className="xbtn-neutral">R-Click</kbd> Recenter
+                  </span>
+                </div>
+              </div>
+            )}
           </section>
 
-          {/* PHASE 3: LIVE 2D EXPLORATION MAP & ROVER DISCOVERY LOG */}
-          {(hasRemoteVideo || demoMode) && (
+          {/* LIVE 2D EXPLORATION MAP & ROVER DISCOVERY LOG */}
+          {isRemoteDriverLive && (
             <div className="explorer-intel-grid">
               <section className="console-panel" aria-label="Live 2D exploration map panel">
                 <RoomMapCanvas
@@ -2081,7 +2323,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   <div>
                     <h2>Rover Discovery Log</h2>
                     <p className="panel-sub">
-                      Snapshots automatically logged when Auto Explorer spots people or interesting objects
+                      Snapshots logged on the fly while Auto Explorer cruises — never stops moving!
                     </p>
                   </div>
                   <span className="status-tag">{discoveries.length} FOUND</span>
@@ -2090,8 +2332,8 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                 {discoveries.length === 0 ? (
                   <div className="timeline-empty">
                     Switch Pilot Mode to <strong>Auto Explorer</strong> (or press <strong>Xbox Y</strong>)
-                    to let your tank roam, map the room, and photograph discoveries here. Touching the
-                    Xbox stick or WASD always takes back manual control instantly.
+                    to let your tank glide smoothly around obstacles, build the 2D room map, and log
+                    discoveries here. Touching the Xbox stick or WASD always takes back manual control.
                   </div>
                 ) : (
                   <div className="discovery-grid">
@@ -2130,45 +2372,58 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               <div>
                 <h2>Android Phone on Tank (Host)</h2>
                 <p className="panel-sub">
-                  Strap this phone low &amp; centered on your tank — runs real-time vision, 2D room
-                  mapping &amp; autonomous exploration locally while streaming FPV over Wi-Fi
+                  Mount this phone facing forward on your tank — auto-announces on your Wi-Fi (no IP
+                  address needed!) while streaming camera &amp; smooth vision navigation
                 </p>
               </div>
-              <span className={`status-tag ${hostCameraActive ? "is-live" : ""}`}>
-                {hostCameraActive ? "STREAMING" : "STANDBY"}
+              <span className={`status-tag ${hostActive ? "is-live" : ""}`}>
+                {hostActive ? "BROADCASTING" : "STANDBY"}
               </span>
             </div>
 
-            {hostCameraError && <div className="notice notice-danger">{hostCameraError}</div>}
+            {hostCameraError && <div className="notice notice-info">{hostCameraError}</div>}
 
             <div className="room-code-hero">
               <div>
-                <span className="engraved-label">Enter This Code on Chromebook</span>
+                <span className="engraved-label">Room Code (Auto-Discovered on Same Wi-Fi)</span>
                 <div className="room-code-display mono-num" aria-label="Rover Room Code">
                   {roomCode.split("").join(" ")}
                 </div>
               </div>
-              <button
-                type="button"
-                className="keycap keycap-subtle keycap-sm"
-                disabled={hostCameraActive}
-                onClick={() => setRoomCode(generateRoomCode(4))}
-              >
-                New Code
-              </button>
+              <div className="action-cluster">
+                <button
+                  type="button"
+                  className="keycap keycap-subtle keycap-sm"
+                  onClick={handleCopyJoinLink}
+                >
+                  {copiedLink ? "Link Copied!" : "Copy Join Link"}
+                </button>
+                <button
+                  type="button"
+                  className="keycap keycap-subtle keycap-sm"
+                  disabled={hostActive}
+                  onClick={() => setRoomCode(generateRoomCode(4))}
+                >
+                  New Code
+                </button>
+              </div>
             </div>
 
             <div className="host-checklist">
               <div className={`host-check-item ${connected ? "is-ok" : ""}`}>
                 <strong>1. Move Hub Bluetooth</strong>
-                <span>{connected ? "Connected & ready" : "Tap Connect Robot in top bar first"}</span>
-              </div>
-              <div className={`host-check-item ${hostCameraActive ? "is-ok" : ""}`}>
-                <strong>2. Rear Camera, Vision &amp; Wake Lock</strong>
                 <span>
-                  {hostCameraActive
-                    ? `Active${hostWakeLocked ? " · Awake" : ""}${phoneHeadingDeg !== null ? ` · Gyro ${phoneHeadingDeg}°` : ""}${aiEnabled ? " · AI ON" : ""}`
-                    : "Tap Start Rear Camera & Host below"}
+                  {connected
+                    ? "Connected & ready to drive"
+                    : "Tap Connect Robot in the top bar (you can connect before or after starting Wi-Fi!)"}
+                </span>
+              </div>
+              <div className={`host-check-item ${hostActive ? "is-ok" : ""}`}>
+                <strong>2. Rear Camera &amp; Same-Wi-Fi Auto-Discovery</strong>
+                <span>
+                  {hostActive
+                    ? `${hostCameraActive ? "Camera Live" : "Control Only"}${hostWakeLocked ? " · Awake" : ""}${phoneHeadingDeg !== null ? ` · Gyro ${phoneHeadingDeg}°` : ""} · ${hostDiscoveryNote}`
+                    : "Tap Start Camera & Broadcast on Wi-Fi below"}
                 </span>
               </div>
               <div className={`host-check-item ${linkState === "connected" ? "is-ok" : ""}`}>
@@ -2178,14 +2433,14 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
             </div>
 
             <div className="action-cluster">
-              {hostCameraActive ? (
+              {hostActive ? (
                 <button
                   type="button"
                   id="btn-stop-host"
                   className="keycap keycap-stop"
                   onClick={stopHostCamera}
                 >
-                  Stop Tank Camera &amp; Host
+                  Stop Tank Host
                 </button>
               ) : (
                 <button
@@ -2195,7 +2450,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   onClick={() => void startHostCameraAndBroadcast()}
                 >
                   <IconCamera size={15} />
-                  <span>Start Rear Camera &amp; Host</span>
+                  <span>Start Camera &amp; Broadcast on Wi-Fi</span>
                 </button>
               )}
 
@@ -2218,7 +2473,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               <button
                 type="button"
                 className={`keycap keycap-sm ${assistMode === "explorer" ? "keycap-orange" : "keycap-subtle"}`}
-                disabled={!connected || !hostCameraActive}
+                disabled={!connected || !hostActive}
                 onClick={() => {
                   if (assistMode === "explorer") {
                     explorerRef.current.reset();
@@ -2233,7 +2488,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               </button>
             </div>
 
-            {hostCameraActive && (
+            {hostActive && (
               <div className="notice notice-info">
                 <strong>
                   {assistMode === "explorer" ? `Auto Explorer · ${explorerState}` : "Smart Co-Pilot"}:
@@ -2256,7 +2511,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
               {!hostCameraActive && (
                 <div className="viewfinder-standby">
                   <IconCamera size={28} />
-                  <span>Rear camera preview appears here once hosted</span>
+                  <span>Rear camera preview appears here once broadcasting</span>
                 </div>
               )}
               {hostCameraActive && localVision && (
@@ -2275,7 +2530,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                 className="chip-btn"
                 onClick={() => setShowOfflineFallback((v) => !v)}
               >
-                {showOfflineFallback ? "Hide Offline Pairing" : "Offline Zero-Server Pairing"}
+                {showOfflineFallback ? "Hide Manual Copy/Paste Pair" : "Offline Copy/Paste Pairing"}
               </button>
               {showOfflineFallback && (
                 <div className="offline-pair-box">

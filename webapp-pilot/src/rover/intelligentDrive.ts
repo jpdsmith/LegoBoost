@@ -169,29 +169,29 @@ export class IntelligentDriveController {
       const leftClear = (input.corridors[0] + input.corridors[1]) / 2;
       const rightClear = (input.corridors[3] + input.corridors[4]) / 2;
 
-      const hardBlocked = bumperDist <= 28 || centerClear < 0.18;
-      const cautionBlocked = bumperDist <= 50 || centerClear < 0.42;
+      const hardBlocked = bumperDist <= 22 || centerClear < 0.15;
+      const cautionBlocked = bumperDist <= 46 || centerClear < 0.36;
 
       if (hardBlocked) {
-        if (input.collisionGuard === "dodge" && Math.max(leftClear, rightClear) > 0.35) {
+        if (input.collisionGuard === "dodge" && Math.max(leftClear, rightClear) > 0.32) {
           const dodgeDir = rightClear >= leftClear ? 1 : -1;
-          throttle = Math.min(throttle, 0.22);
-          steer = clamp(steer * 0.3 + dodgeDir * 0.78, -1, 1);
+          throttle = Math.min(throttle, 0.38);
+          steer = clamp(steer * 0.25 + dodgeDir * 0.78, -1, 1);
           intervening = "dodging";
-          statusNote = `Auto-Dodge steering ${dodgeDir > 0 ? "right" : "left"} around obstacle`;
+          statusNote = `Auto-Dodge curving ${dodgeDir > 0 ? "right" : "left"} around obstacle`;
         } else {
           throttle = 0;
           intervening = "braking";
           statusNote =
-            bumperDist <= 28
+            bumperDist <= 22
               ? `Auto-Brake! Front bumper ${bumperDist}% (reverse to back out)`
               : "Auto-Brake! Obstacle directly ahead";
         }
       } else if (cautionBlocked) {
-        const scale = clamp(Math.min((bumperDist - 24) / 30, centerClear / 0.45), 0.35, 0.85);
+        const scale = clamp(Math.min((bumperDist - 18) / 30, centerClear / 0.4), 0.45, 0.88);
         throttle *= scale;
         if (input.collisionGuard === "dodge" && Math.abs(leftClear - rightClear) > 0.14) {
-          const nudge = rightClear > leftClear ? 0.32 : -0.32;
+          const nudge = rightClear > leftClear ? 0.36 : -0.36;
           steer = clamp(steer + nudge, -1, 1);
           intervening = "dodging";
           statusNote = "Smart Dodge curving toward clearer floor";

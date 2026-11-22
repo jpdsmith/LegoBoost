@@ -189,3 +189,12 @@ export const IconTank: React.FC<IconProps> = ({ size = 18, className }) => (
   </svg>
 );
 
+export const IconVrHeadset: React.FC<IconProps> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}>
+    <path d="M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3.6a1.5 1.5 0 0 1-1.3-.8l-.9-1.6a1.4 1.4 0 0 0-2.4 0l-.9 1.6a1.5 1.5 0 0 1-1.3.8H5a2 2 0 0 1-2-2V8Z" />
+    <circle cx="8.5" cy="11.5" r="1.5" />
+    <circle cx="15.5" cy="11.5" r="1.5" />
+  </svg>
+);
+
+

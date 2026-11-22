@@ -405,7 +405,7 @@ export const EyesVoiceStation: React.FC<EyesVoiceStationProps> = ({
           intent: parsed.intent,
           reply:
             parsed.reply ??
-            (st.connected ? "Done!" : "Understood (connect or launch Demo to move Vernie)."),
+            (st.connected ? "Done!" : "Understood (connect robot to move Vernie)."),
           blocked: parsed.blockedBySafety,
         },
         ...prev.slice(0, 7),
