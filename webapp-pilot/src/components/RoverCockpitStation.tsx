@@ -1049,11 +1049,10 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       let lockedTarget: DetectedObjectBox | null = null;
 
       if (ctx && video && video.readyState >= 2) {
-        // Freeze persistent floor model when near a wall or blocked swept path so walls never poison floor color!
-        const safeToLearnFloor =
-          st.distancePct > 35 &&
-          !st.pickedUp &&
-          (latestVisionRef.current?.sweptClear ?? 1) >= 0.4;
+        // Freeze persistent floor model ONLY on physical 88007 proximity (<= 35%) or pickup.
+        // Never gate on sweptClear (which causes a self-reinforcing deadlock after camera AE shifts!);
+        // roverVision's own chroma/texture check already rejects smooth walls entering the floor patch.
+        const safeToLearnFloor = st.distancePct > 35 && !st.pickedUp;
         ctx.drawImage(video, 0, 0, VISION_W, VISION_H);
         const img = ctx.getImageData(0, 0, VISION_W, VISION_H);
         const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H, {

@@ -2,7 +2,7 @@
 // Offline Service Worker for Vernie Pilot PWA.
 // Caches the app shell for instant offline launch while keeping firmware binaries network-first.
 
-const CACHE_NAME = "vernie-pilot-v6";
+const CACHE_NAME = "vernie-pilot-v7";
 const SHELL_ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./pilot-icon.svg", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {

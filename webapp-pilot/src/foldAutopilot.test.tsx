@@ -212,6 +212,61 @@ describe("Pixel Fold Left-Offset Vision, Shadow Tolerance, Floor Freeze & Chair-
     expect(model.samples).toBe(prevSamples);
     expect(resClose.sweptClear).toBeLessThan(0.1);
   });
+
+  it("adapts smoothly to +70 luma Pixel Fold AE bright-carpet jumps while still blocking smooth grey ottomans", () => {
+    const w = 160;
+    const h = 120;
+    const makeCarpet = (baseR: number, baseG: number, baseB: number): Uint8ClampedArray => {
+      const buf = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const grain = (((x * 37 + y * 17) ^ (x * 13 - y * 29)) & 15) - 8;
+          const idx = (y * w + x) * 4;
+          buf[idx] = Math.max(0, Math.min(255, baseR + grain));
+          buf[idx + 1] = Math.max(0, Math.min(255, baseG + grain));
+          buf[idx + 2] = Math.max(0, Math.min(255, baseB + grain));
+          buf[idx + 3] = 255;
+        }
+      }
+      return buf;
+    };
+
+    const model = createFloorModel();
+    // Frame 1: shaded beige carpet (Y ≈ 100)
+    const shaded = makeCarpet(116, 97, 82);
+    const res1 = analyzeFloorCorridors(shaded, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model,
+      allowFloorUpdate: true,
+    });
+    expect(res1.sweptClear).toBeGreaterThan(0.85);
+
+    // Frame 2: sudden Pixel Fold AE jump (+70 luma, same beige chroma!) -> stays open & adapts!
+    const sunlit = makeCarpet(189, 168, 150);
+    const res2 = analyzeFloorCorridors(sunlit, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model,
+      allowFloorUpdate: true,
+    });
+    expect(res2.sweptClear).toBeGreaterThan(0.85);
+    expect(res2.corridors[2]).toBeGreaterThan(0.85);
+
+    // Frame 3: smooth grey fabric ottoman occupying left-center on carpet -> blocked cleanly!
+    const ottoman = makeCarpet(116, 97, 82);
+    paintRect(ottoman, w, h, 20, 35, 130, 110, 136, 119, 111);
+    const model2 = createFloorModel();
+    analyzeFloorCorridors(shaded, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model2,
+      allowFloorUpdate: true,
+    });
+    const resOtt = analyzeFloorCorridors(ottoman, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model2,
+      allowFloorUpdate: true,
+    });
+    expect(resOtt.sweptClear).toBeLessThan(0.25);
+  });
 });
 
 describe("Gimbal-Lock-Free Gravity-Projected Gyro Heading (90° Pixel Fold Mount)", () => {
@@ -553,6 +608,127 @@ describe("RoomMapper Encoder Saturation Fallback & IntelligentExplorer Upgrades"
     expect(unstickTick!.recoveries).toBe(1);
     expect(unstickTick!.left).toBeLessThanOrEqual(-35);
     expect(unstickTick!.right).toBeLessThanOrEqual(-35);
+  });
+
+  it("never blindly reverses when front >= 65% and immediately aborts reverse on rear bump with cooldown", () => {
+    const mapper = new RoomMapper();
+    const exp = new IntelligentExplorer();
+    const base = {
+      mission: "explore-room" as const,
+      speedCap: 65,
+      pickedUp: false,
+      safeMode: false,
+      bump: false,
+      flowForward: 0.5,
+      flowConfidence: 0.9,
+      headingDeg: 160,
+      encA: 100,
+      encB: 100,
+      speedA: 40,
+      speedB: 40,
+      objects: [],
+      mapper,
+    };
+
+    // Case A: Vision sees distant obstacle (sweptClear=0) yet front 88007 is 100% -> skips reverse, rolls forward arc!
+    let distantOut = exp.step({
+      ...base,
+      nowMs: 1000,
+      frontDistancePct: 100,
+      corridors: [0.0, 0.0, 0.0, 0.0, 0.6],
+      sweptClear: 0.0,
+      bestSteer: 0.6,
+    });
+    for (let t = 1100; t <= 1400; t += 100) {
+      distantOut = exp.step({
+        ...base,
+        nowMs: t,
+        frontDistancePct: 100,
+        corridors: [0.0, 0.0, 0.0, 0.0, 0.6],
+        sweptClear: 0.0,
+        bestSteer: 0.6,
+      });
+      expect(distantOut.throttle).toBeGreaterThanOrEqual(0);
+    }
+    expect(distantOut.state).toBe("AVOIDING");
+
+    // Case B: Close front obstacle (frontDistancePct=20) enters short reverse, then a REAR BUMP at +200 ms
+    // MUST abort reverse immediately and prevent reversing again on back-to-back AVOIDING!
+    const expRear = new IntelligentExplorer();
+    const rev1 = expRear.step({
+      ...base,
+      nowMs: 1000,
+      frontDistancePct: 20,
+      corridors: [0.7, 0.6, 0.05, 0.0, 0.0],
+      sweptClear: 0.0,
+      bestSteer: -0.8,
+    });
+    expect(rev1.state).toBe("AVOIDING");
+    expect(rev1.throttle).toBeLessThan(-0.5);
+
+    // At +200 ms while reversing, back of tank hits rear wall (bump=true) -> immediately aborts reverse!
+    const aborted = expRear.step({
+      ...base,
+      nowMs: 1200,
+      bump: true,
+      frontDistancePct: 35,
+      corridors: [0.7, 0.6, 0.05, 0.0, 0.0],
+      sweptClear: 0.0,
+      bestSteer: -0.8,
+    });
+    expect(aborted.state).toBe("AVOIDING");
+    expect(aborted.throttle).toBeGreaterThanOrEqual(0);
+  });
+
+  it("switches from stationary pivot to rolling carpet-grip forward arc when gyro detects tire slip", () => {
+    const mapper = new RoomMapper();
+    const exp = new IntelligentExplorer();
+    const base = {
+      mission: "explore-room" as const,
+      speedCap: 65,
+      pickedUp: false,
+      safeMode: false,
+      bump: false,
+      flowForward: 0.05,
+      flowConfidence: 0.9,
+      headingDeg: 162, // frozen heading -> wheels slipping on carpet!
+      encA: 100,
+      encB: 100,
+      speedA: 40,
+      speedB: -40,
+      objects: [],
+      mapper,
+    };
+
+    // Enter AVOIDING via close wall (front=20), then move to front=48 while gyro stays stuck at 162°
+    exp.step({
+      ...base,
+      nowMs: 1000,
+      frontDistancePct: 20,
+      corridors: [0.8, 0.7, 0.05, 0.0, 0.0],
+      sweptClear: 0.0,
+      bestSteer: -0.8,
+    });
+
+    let pivotSeen = false;
+    let rollingFallbackSeen = false;
+    for (let t = 1100; t <= 3100; t += 100) {
+      const out = exp.step({
+        ...base,
+        nowMs: t,
+        frontDistancePct: 48,
+        corridors: [0.8, 0.7, 0.2, 0.0, 0.0],
+        sweptClear: 0.2,
+        bestSteer: -0.8,
+      });
+      if (out.state === "AVOIDING" && out.left * out.right < 0) pivotSeen = true;
+      if (pivotSeen && out.state === "AVOIDING" && out.throttle > 0.25 && out.left > 0 && out.right > 0) {
+        rollingFallbackSeen = true;
+        break;
+      }
+    }
+    expect(pivotSeen).toBe(true);
+    expect(rollingFallbackSeen).toBe(true);
   });
 });
 

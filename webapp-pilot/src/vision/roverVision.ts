@@ -424,15 +424,17 @@ export function analyzeFloorCorridors(
       const patchYcc = rgbToYCbCr(sampleR, sampleG, sampleB);
       const chromaJump = Math.hypot(patchYcc.cb - model.cb, patchYcc.cr - model.cr);
       const lumaJump = Math.abs(patchYcc.y - model.y);
-      // Verify the foreground patch still matches the floor's texture/chroma before adapting
-      // so smooth walls entering the bottom patch never poison the learned floor model,
-      // while phone AE transitions across sunlit/shaded carpet adapt cleanly!
-      const isTexturedFloor = model.tex >= 6.5;
-      const patchLooksLikeFloor = isTexturedFloor
-        ? sampleTex >= model.tex * 0.48 && chromaJump < 9.0
-        : chromaJump < 8.5 && lumaJump < 38;
-      if (patchLooksLikeFloor) {
-        const alpha = chromaJump < 4.5 ? 0.45 : 0.18;
+      // Verify the foreground patch still matches the floor's chroma/texture before adapting:
+      // - Same-chroma camera AE / sunlit shifts (chromaJump < 4.2) ALWAYS adapt smoothly across large
+      //   luma jumps as long as carpet doesn't collapse to a completely smooth wall (sampleTex < 1.8)!
+      // - Neutral white skirting boards (chromaJump ≈ 8.5) & smooth grey fabric (chromaJump ≈ 5.4, tex ≈ 1)
+      //   are rejected so close obstacles never poison the learned floor model.
+      const isTexturedFloor = model.tex >= 4.8;
+      const sameChromaAe = chromaJump < 4.2 && (!isTexturedFloor || sampleTex >= 1.8);
+      const texturedFloor = isTexturedFloor && sampleTex >= model.tex * 0.42 && chromaJump < 8.5;
+      const smoothFloor = !isTexturedFloor && chromaJump < 7.5 && lumaJump < 42;
+      if (sameChromaAe || texturedFloor || smoothFloor) {
+        const alpha = chromaJump < 3.5 ? 0.55 : chromaJump < 5.0 ? 0.35 : 0.16;
         model.r += (sampleR - model.r) * alpha;
         model.g += (sampleG - model.g) * alpha;
         model.b += (sampleB - model.b) * alpha;
@@ -441,7 +443,9 @@ export function analyzeFloorCorridors(
         model.cb = updated.cb;
         model.cr = updated.cr;
         model.noise += (sampleNoise - model.noise) * alpha;
-        model.tex += (sampleTex - model.tex) * 0.15;
+        // Slow-decay carpet texture during brief motion blur so carpet identity isn't lost mid-turn
+        const texAlpha = sampleTex >= model.tex * 0.5 ? 0.18 : 0.06;
+        model.tex += (sampleTex - model.tex) * texAlpha;
         model.samples += 1;
       }
     }
@@ -458,6 +462,7 @@ export function analyzeFloorCorridors(
   const colorDistThresh = clamp(32 + floorNoise * 1.5, 32, 68);
   const chromaBarrierThresh = clamp(6.6 + floorNoise * 0.16, 6.6, 11.5);
   const shadowLumaThresh = clamp(62 + floorNoise * 2.1, 64, 108);
+  const sameChromaBrightThresh = clamp(68 + floorNoise * 1.8, 68, 105);
   const brightLumaThresh = clamp(28 + floorNoise * 0.9, 28, 46);
   const edgeThresh = clamp(30 + floorNoise * 1.4, 30, 68);
   const vertEdgeThresh = clamp(32 + floorNoise * 1.5, 32, 72);
@@ -468,8 +473,9 @@ export function analyzeFloorCorridors(
   const xStep = width >= 140 ? 2 : width >= 70 ? 2 : 1;
 
   // Pixel obstacle classification helper:
-  //   - Dark-only shadow tolerance (never classifies bright white walls/baseboards as shadows!)
-  //   - 4x4 micro-texture smoothness barrier (catches painted baseboards on textured carpet)
+  //   - Dark-shadow tolerance (dy < 0, chromaDiff <= 5.2) + same-chroma sunlit/AE tolerance (chromaDiff <= 3.6)
+  //     so neutral white skirting boards (chromaDiff ≈ 8.5) NEVER pass while bright sunlit carpet stays open!
+  //   - 4x4 micro-texture smoothness barrier (catches painted baseboards & smooth ottomans on carpet)
   //   - Dual-axis edges (1-2 row baseboard seam + vertical chair/table legs)
   const classifyPixel = (
     x: number,
@@ -487,24 +493,24 @@ export function analyzeFloorCorridors(
     const dy = pxYcc.y - floorYcc.y;
     const lumaDiff = Math.abs(dy);
 
-    // Shadow-tolerant color test:
-    // Only DARKER regions (dy < 0) with tightly preserved floor chromaticity pass as cast shadows.
-    // Brighter neutral white skirting boards / walls never qualify as shadows!
     const isDarkShadow = dy < 0 && chromaDiff <= 5.2;
+    const isSameChromaBright = dy >= 0 && chromaDiff <= 3.6;
     const meanRgbDiff = (Math.abs(r - floorR) + Math.abs(g - floorG) + Math.abs(b - floorB)) / 3;
     const colorBarrier = isDarkShadow
       ? lumaDiff > shadowLumaThresh
-      : chromaDiff > chromaBarrierThresh ||
-        (dy > brightLumaThresh && chromaDiff > 3.6) ||
-        meanRgbDiff > colorDistThresh;
+      : isSameChromaBright
+        ? lumaDiff > sameChromaBrightThresh
+        : chromaDiff > chromaBarrierThresh ||
+          (dy > brightLumaThresh && chromaDiff > 3.6) ||
+          meanRgbDiff > colorDistThresh;
 
-    // Micro-texture smoothness barrier: smooth painted walls/skirting boards on textured carpet
+    // Micro-texture smoothness barrier: smooth painted walls/skirting boards & fabric ottomans on carpet
     const localTex = blockTex[Math.min(bh - 1, y >> 2) * bw + Math.min(bw - 1, x >> 2)];
     const expectedFloorTex = floorTex * (1 - depthFrac * 0.45);
     const smoothWallHit =
-      floorTex >= 6.5 &&
-      localTex < expectedFloorTex * 0.36 &&
-      (chromaDiff > 4.0 || lumaDiff > 14);
+      floorTex >= 4.8 &&
+      localTex < expectedFloorTex * 0.34 &&
+      (chromaDiff > 4.2 || (lumaDiff > 20 && chromaDiff > 2.8));
 
     const pxHsv = rgbToHsv(r, g, b);
     const hueBarrier =
@@ -522,7 +528,8 @@ export function analyzeFloorCorridors(
     const vertEdgeHit = Math.abs(lCurr - lLeft) > vertEdgeThresh;
 
     // A vertical edge combined with non-shadow chroma/color deviation catches narrow chair legs!
-    const legEdgeHit = vertEdgeHit && (!isDarkShadow || lumaDiff > colorDistThresh * 0.75);
+    const legEdgeHit =
+      vertEdgeHit && (!(isDarkShadow || isSameChromaBright) || lumaDiff > colorDistThresh * 0.75);
 
     return {
       blocked:
