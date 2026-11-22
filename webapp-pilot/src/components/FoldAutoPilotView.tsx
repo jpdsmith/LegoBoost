@@ -646,7 +646,7 @@ export const FoldAutoPilotView: React.FC<FoldAutoPilotViewProps> = ({
                 </span>
                 <input
                   type="range"
-                  min={28}
+                  min={22}
                   max={60}
                   step={1}
                   value={Math.round(calibration.horizonY * 100)}

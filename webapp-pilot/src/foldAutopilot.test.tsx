@@ -157,6 +157,61 @@ describe("Pixel Fold Left-Offset Vision, Shadow Tolerance, Floor Freeze & Chair-
     expect(flowStuckOnRug.confidence).toBeGreaterThanOrEqual(0.8);
     expect(Math.abs(flowStuckOnRug.flowForward)).toBeLessThan(0.05);
   });
+
+  it("detects smooth white skirting board on plush textured beige carpet without poisoning floorModel", () => {
+    const w = 160;
+    const h = 120;
+    const fillCarpet = (): Uint8ClampedArray => {
+      const buf = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          // Deterministic carpet pile micro-texture matching real Pixel Fold carpet readings (~13 tex)
+          const grain = (((x * 37 + y * 17) ^ (x * 13 - y * 29)) & 31) - 16;
+          const idx = (y * w + x) * 4;
+          buf[idx] = Math.max(0, Math.min(255, 114 + grain));
+          buf[idx + 1] = Math.max(0, Math.min(255, 97 + grain));
+          buf[idx + 2] = Math.max(0, Math.min(255, 81 + grain));
+          buf[idx + 3] = 255;
+        }
+      }
+      return buf;
+    };
+
+    const model = createFloorModel();
+    // Frame 1: open plush beige carpet -> learns carpet color & high 4x4 micro-texture
+    const openCarpet = fillCarpet();
+    const resOpen = analyzeFloorCorridors(openCarpet, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model,
+      allowFloorUpdate: true,
+    });
+    expect(resOpen.sweptClear).toBeGreaterThan(0.85);
+    expect(model.tex).toBeGreaterThanOrEqual(8);
+
+    // Frame 2: smooth painted white skirting board / doorframe on right half (low-chroma neutral white!)
+    const skirtingFrame = fillCarpet();
+    paintRect(skirtingFrame, w, h, 82, 30, 160, 112, 136, 131, 124);
+    const resWall = analyzeFloorCorridors(skirtingFrame, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model,
+      allowFloorUpdate: true,
+    });
+    expect(resWall.corridors[3]).toBeLessThan(0.15);
+    expect(resWall.corridors[4]).toBeLessThan(0.15);
+    expect(resWall.sweptClear).toBeLessThan(0.25);
+    expect(resWall.bestSteer).toBeLessThan(-0.4); // Steers strongly left away from doorframe!
+
+    // Frame 3: smooth white wall fills entire bottom floor patch -> texture guard rejects poisoning!
+    const allWall = fillSolidFrame(w, h, 136, 131, 124);
+    const prevSamples = model.samples;
+    const resClose = analyzeFloorCorridors(allWall, w, h, {
+      calibration: PIXEL_FOLD_DEFAULT_CALIBRATION,
+      floorModel: model,
+      allowFloorUpdate: true,
+    });
+    expect(model.samples).toBe(prevSamples);
+    expect(resClose.sweptClear).toBeLessThan(0.1);
+  });
 });
 
 describe("Gimbal-Lock-Free Gravity-Projected Gyro Heading (90° Pixel Fold Mount)", () => {
@@ -342,6 +397,162 @@ describe("RoomMapper Encoder Saturation Fallback & IntelligentExplorer Upgrades"
     expect(res.state).toBe("CRUISING");
     // Steers smoothly RIGHT (left > right) away from the chair on the left-center!
     expect(res.left).toBeGreaterThan(res.right);
+  });
+
+  it("ignores transient 400 ms carpet pickedUp/bump jolts while pausing on >= 900 ms lift or instant safeMode", () => {
+    const mapper = new RoomMapper();
+    const exp = new IntelligentExplorer();
+    const base = {
+      mission: "explore-room" as const,
+      speedCap: 65,
+      safeMode: false,
+      frontDistancePct: 100,
+      corridors: [0.95, 0.95, 0.95, 0.95, 0.95] as [number, number, number, number, number],
+      sweptClear: 0.95,
+      bestSteer: 0,
+      flowForward: 1.2,
+      flowConfidence: 0.9,
+      headingDeg: 10,
+      encA: 200,
+      encB: 200,
+      speedA: 42,
+      speedB: 54,
+      objects: [],
+      mapper,
+    };
+
+    // 400 ms carpet jolt (pickedUp=true & bump=true while briskly rolling across open floor) -> stays CRUISING!
+    for (let t = 100; t <= 400; t += 100) {
+      const out = exp.step({ ...base, nowMs: t, pickedUp: true, bump: true });
+      expect(out.state).toBe("CRUISING");
+      expect(out.left).toBeGreaterThan(20);
+      expect(out.right).toBeGreaterThan(20);
+    }
+
+    // Clear jolt for 300 ms, then simulate a genuine continuous lift (>= 900 ms) -> pauses cleanly!
+    for (let t = 500; t <= 700; t += 100) {
+      exp.step({ ...base, nowMs: t, pickedUp: false, bump: false });
+    }
+    let liftOut = exp.step({ ...base, nowMs: 800, pickedUp: true, bump: false });
+    for (let t = 900; t <= 1800; t += 100) {
+      liftOut = exp.step({ ...base, nowMs: t, pickedUp: true, bump: false });
+    }
+    expect(liftOut.state).toBe("PAUSED");
+    expect(liftOut.left).toBe(0);
+    expect(liftOut.right).toBe(0);
+
+    // safeMode must ALWAYS pause on tick 1 (0 ms)!
+    const expSafe = new IntelligentExplorer();
+    const safeOut = expSafe.step({ ...base, nowMs: 100, pickedUp: false, bump: false, safeMode: true });
+    expect(safeOut.state).toBe("PAUSED");
+    expect(safeOut.left).toBe(0);
+    expect(safeOut.right).toBe(0);
+  });
+
+  it("snaps immediately into dual-tread reverse and counter-rotating carpet spin on AVOIDING entry", () => {
+    const mapper = new RoomMapper();
+    const exp = new IntelligentExplorer();
+    const base = {
+      mission: "explore-room" as const,
+      speedCap: 65,
+      pickedUp: false,
+      safeMode: false,
+      bump: false,
+      flowForward: 1.0,
+      flowConfidence: 0.9,
+      headingDeg: 0,
+      encA: 100,
+      encB: 100,
+      speedA: 45,
+      speedB: 45,
+      objects: [],
+      mapper,
+    };
+
+    // Prime forward cruise momentum
+    exp.step({
+      ...base,
+      nowMs: 1000,
+      frontDistancePct: 90,
+      corridors: [0.9, 0.9, 0.9, 0.9, 0.9],
+      sweptClear: 0.9,
+      bestSteer: 0,
+    });
+
+    // Hit close wall (frontDistancePct=20, open on left) -> MUST snap BOTH treads strongly negative immediately!
+    const revTick = exp.step({
+      ...base,
+      nowMs: 1100,
+      frontDistancePct: 20,
+      corridors: [0.7, 0.6, 0.05, 0.0, 0.0],
+      sweptClear: 0.0,
+      bestSteer: -0.9,
+    });
+    expect(revTick.state).toBe("AVOIDING");
+    expect(revTick.left).toBeLessThanOrEqual(-35);
+    expect(revTick.right).toBeLessThanOrEqual(-35);
+
+    // After backing clear (~700 ms), Phase B executes a counter-rotating carpet spin (left * right < 0)!
+    let spinTick = revTick;
+    for (let t = 1200; t <= 1900; t += 100) {
+      spinTick = exp.step({
+        ...base,
+        nowMs: t,
+        frontDistancePct: 50,
+        corridors: [0.75, 0.65, 0.35, 0.1, 0.0],
+        sweptClear: 0.35,
+        bestSteer: -0.7,
+      });
+      if (spinTick.left * spinTick.right < 0) break;
+    }
+    expect(spinTick.state).toBe("AVOIDING");
+    expect(spinTick.left * spinTick.right).toBeLessThan(0);
+    expect(Math.abs(spinTick.left)).toBeGreaterThanOrEqual(45);
+    expect(Math.abs(spinTick.right)).toBeGreaterThanOrEqual(45);
+  });
+
+  it("triggers UNSTICKING via net-progress gyro+flow window when rocking in place against a doorframe", () => {
+    const mapper = new RoomMapper();
+    const exp = new IntelligentExplorer();
+    let encB = 1000;
+    let unstickTick: ReturnType<IntelligentExplorer["step"]> | null = null;
+
+    // Simulate Run #1 doorframe pin: right tread spinning freely, left pinned, phone rocking ±1° & ±0.25 flow!
+    for (let i = 0; i < 24; i++) {
+      const t = 1000 + i * 100;
+      encB += 45;
+      const out = exp.step({
+        nowMs: t,
+        mission: "explore-room",
+        speedCap: 65,
+        pickedUp: false,
+        safeMode: false,
+        bump: false,
+        frontDistancePct: 45,
+        corridors: [0.7, 0.6, 0.3, 0.1, 0.0],
+        sweptClear: 0.3,
+        bestSteer: -0.8,
+        flowForward: i % 2 === 0 ? 0.22 : -0.2,
+        flowTurn: 0,
+        flowConfidence: 0.95,
+        headingDeg: 338 + (i % 2 === 0 ? 1 : -1),
+        yawRateDegS: i % 2 === 0 ? 12 : -12,
+        encA: 1000,
+        encB,
+        speedA: 0,
+        speedB: 60,
+        objects: [],
+        mapper,
+      });
+      if (out.state === "UNSTICKING") {
+        unstickTick = out;
+        break;
+      }
+    }
+    expect(unstickTick).not.toBeNull();
+    expect(unstickTick!.recoveries).toBe(1);
+    expect(unstickTick!.left).toBeLessThanOrEqual(-35);
+    expect(unstickTick!.right).toBeLessThanOrEqual(-35);
   });
 });
 

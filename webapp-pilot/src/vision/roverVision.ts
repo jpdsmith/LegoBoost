@@ -51,7 +51,7 @@ export const PIXEL_FOLD_DEFAULT_CALIBRATION: MountCalibration = {
   camOffsetCm: -4.0,
   robotWidthCm: 17.0,
   fovDeg: 78,
-  horizonY: 0.44,
+  horizonY: 0.36,
   bumperMaskY: 0.9,
   foldTopPct: 48,
 };
@@ -66,6 +66,13 @@ export function loadMountCalibration(): MountCalibration {
     const raw = window.localStorage.getItem(CALIBRATION_STORAGE_KEY);
     if (!raw) return { ...PIXEL_FOLD_DEFAULT_CALIBRATION };
     const parsed = JSON.parse(raw) as Partial<MountCalibration>;
+    // Upgrade legacy 0.44 default horizon to 0.36 for better low-mount wall sightline
+    const rawHorizon =
+      typeof parsed.horizonY === "number"
+        ? Math.abs(parsed.horizonY - 0.44) < 0.001
+          ? PIXEL_FOLD_DEFAULT_CALIBRATION.horizonY
+          : parsed.horizonY
+        : PIXEL_FOLD_DEFAULT_CALIBRATION.horizonY;
     return {
       camOffsetCm: clamp(
         typeof parsed.camOffsetCm === "number" ? parsed.camOffsetCm : PIXEL_FOLD_DEFAULT_CALIBRATION.camOffsetCm,
@@ -82,11 +89,7 @@ export function loadMountCalibration(): MountCalibration {
         50,
         130
       ),
-      horizonY: clamp(
-        typeof parsed.horizonY === "number" ? parsed.horizonY : PIXEL_FOLD_DEFAULT_CALIBRATION.horizonY,
-        0.25,
-        0.65
-      ),
+      horizonY: clamp(rawHorizon, 0.22, 0.65),
       bumperMaskY: clamp(
         typeof parsed.bumperMaskY === "number" ? parsed.bumperMaskY : PIXEL_FOLD_DEFAULT_CALIBRATION.bumperMaskY,
         0.7,
@@ -151,8 +154,8 @@ export function computeSweptBumperBounds(
 }
 
 /**
- * Persistent EMA floor appearance model so approaching a wall or shadow
- * never overwrites the learned floor color.
+ * Persistent EMA floor appearance & micro-texture model so approaching a smooth wall
+ * or white skirting board never overwrites the learned floor color/texture.
  */
 export interface FloorModelState {
   r: number;
@@ -162,11 +165,13 @@ export interface FloorModelState {
   cb: number;
   cr: number;
   noise: number;
+  /** Mean 4x4 local pixel-to-pixel luma texture energy (carpet ≈ 9..19, smooth wall ≈ 1..3) */
+  tex: number;
   samples: number;
 }
 
 export function createFloorModel(): FloorModelState {
-  return { r: 140, g: 130, b: 115, y: 131, cb: 119, cr: 134, noise: 12, samples: 0 };
+  return { r: 140, g: 130, b: 115, y: 131, cb: 119, cr: 134, noise: 12, tex: 0, samples: 0 };
 }
 
 export interface FloorAnalysisOptions {
@@ -286,22 +291,54 @@ export function analyzeFloorCorridors(
     camOffsetCm: options?.calibration?.camOffsetCm ?? 0,
     robotWidthCm: options?.calibration?.robotWidthCm ?? PIXEL_FOLD_DEFAULT_CALIBRATION.robotWidthCm,
     fovDeg: options?.calibration?.fovDeg ?? PIXEL_FOLD_DEFAULT_CALIBRATION.fovDeg,
-    horizonY: clamp(options?.calibration?.horizonY ?? 0.44, 0.25, 0.65),
+    horizonY: clamp(
+      options?.calibration?.horizonY ?? PIXEL_FOLD_DEFAULT_CALIBRATION.horizonY,
+      0.22,
+      0.65
+    ),
     bumperMaskY: clamp(options?.calibration?.bumperMaskY ?? 0.9, 0.7, 0.98),
     foldTopPct: options?.calibration?.foldTopPct ?? 48,
   };
+
+  // Extract 1-byte grayscale luminance buffer once (reused for avgLuma, 4x4 micro-texture, and edges)
+  const luma = extractLuma(rgba, width, height);
 
   // Sample average frame luminance (sparse stride for speed) for low-light auto-headlights
   let totalLuma = 0;
   let totalLumaCount = 0;
   for (let y = 0; y < height; y += 4) {
+    const rowOff = y * width;
     for (let x = 0; x < width; x += 4) {
-      const idx = (y * width + x) * 4;
-      totalLuma += (rgba[idx] * 77 + rgba[idx + 1] * 150 + rgba[idx + 2] * 29) >> 8;
+      totalLuma += luma[rowOff + x];
       totalLumaCount++;
     }
   }
   const avgLuma = totalLumaCount > 0 ? Math.round(totalLuma / totalLumaCount) : 128;
+
+  // Precompute 4x4 local micro-texture map (plush carpet ≈ 9..19 vs smooth painted walls/baseboards ≈ 1..3)
+  const bw = Math.max(1, width >> 2);
+  const bh = Math.max(1, height >> 2);
+  const blockTex = new Float32Array(bw * bh);
+  for (let by = 0; by < bh; by++) {
+    const y0 = by << 2;
+    const y1 = Math.min(height - 1, y0 + 4);
+    for (let bx = 0; bx < bw; bx++) {
+      const x0 = bx << 2;
+      const x1 = Math.min(width - 1, x0 + 4);
+      let texSum = 0;
+      let texN = 0;
+      for (let yy = y0; yy < y1; yy++) {
+        const rowOff = yy * width;
+        for (let xx = x0; xx < x1; xx++) {
+          const v = luma[rowOff + xx];
+          texSum +=
+            Math.abs(v - luma[rowOff + xx + 1]) + Math.abs(v - luma[rowOff + width + xx]);
+          texN++;
+        }
+      }
+      blockTex[by * bw + bx] = texN > 0 ? texSum / texN : 0;
+    }
+  }
 
   // 1. Sample immediate foreground floor patch right above bumperMaskY, centered on robot centerline
   const nearBounds = computeSweptBumperBounds(cal, 0.12);
@@ -332,7 +369,8 @@ export function analyzeFloorCorridors(
   const sampleG = count > 0 ? sumG / count : 130;
   const sampleB = count > 0 ? sumB / count : 115;
 
-  // Measure foreground texture variance so patterned carpets/rugs don't trigger false obstacles
+  // Measure foreground texture variance & 4x4 micro-texture so patterned carpets don't false-trigger
+  // while smooth painted skirting boards / walls stand out sharply against textured flooring
   let varSum = 0;
   for (let y = yStart; y < yEnd; y++) {
     for (let x = xStart; x < xEnd; x++) {
@@ -345,12 +383,29 @@ export function analyzeFloorCorridors(
   }
   const sampleNoise = count > 0 ? varSum / count : 12;
 
-  // Blend into persistent EMA floor model when provided and safe to update
+  const patchBlockTex: number[] = [];
+  const pby0 = clamp(yStart >> 2, 0, bh - 1);
+  const pby1 = clamp((yEnd - 1) >> 2, pby0, bh - 1);
+  const pbx0 = clamp(xStart >> 2, 0, bw - 1);
+  const pbx1 = clamp((xEnd - 1) >> 2, pbx0, bw - 1);
+  for (let by = pby0; by <= pby1; by++) {
+    for (let bx = pbx0; bx <= pbx1; bx++) {
+      patchBlockTex.push(blockTex[by * bw + bx]);
+    }
+  }
+  patchBlockTex.sort((a, b) => a - b);
+  // Use the median 4x4 micro-texture so an obstacle seam touching one corner of a smooth hardwood
+  // patch never inflates floorTex into falsely thinking the floor is plush carpet!
+  const sampleTex =
+    patchBlockTex.length > 0 ? patchBlockTex[Math.floor(patchBlockTex.length / 2)] : 0;
+
+  // Blend into persistent EMA floor model when provided and verified to still be genuine floor
   const model = options?.floorModel ?? null;
   let floorR = sampleR;
   let floorG = sampleG;
   let floorB = sampleB;
   let floorNoise = sampleNoise;
+  let floorTex = sampleTex;
 
   if (model) {
     const allowUpdate = options?.allowFloorUpdate !== false;
@@ -363,89 +418,118 @@ export function analyzeFloorCorridors(
       model.cb = ycc.cb;
       model.cr = ycc.cr;
       model.noise = sampleNoise;
+      model.tex = sampleTex;
       model.samples = 1;
     } else if (allowUpdate && sampleNoise < 44) {
-      // Only adapt smoothly if the new patch isn't a drastic wall jump (or adapt slowly)
       const patchYcc = rgbToYCbCr(sampleR, sampleG, sampleB);
       const chromaJump = Math.hypot(patchYcc.cb - model.cb, patchYcc.cr - model.cr);
       const lumaJump = Math.abs(patchYcc.y - model.y);
-      const alpha = chromaJump < 16 && lumaJump < 55 ? 0.14 : 0.03;
-      model.r += (sampleR - model.r) * alpha;
-      model.g += (sampleG - model.g) * alpha;
-      model.b += (sampleB - model.b) * alpha;
-      const updated = rgbToYCbCr(model.r, model.g, model.b);
-      model.y = updated.y;
-      model.cb = updated.cb;
-      model.cr = updated.cr;
-      model.noise += (sampleNoise - model.noise) * alpha;
-      model.samples += 1;
+      // Verify the foreground patch still matches the floor's texture/chroma before adapting
+      // so smooth walls entering the bottom patch never poison the learned floor model,
+      // while phone AE transitions across sunlit/shaded carpet adapt cleanly!
+      const isTexturedFloor = model.tex >= 6.5;
+      const patchLooksLikeFloor = isTexturedFloor
+        ? sampleTex >= model.tex * 0.48 && chromaJump < 9.0
+        : chromaJump < 8.5 && lumaJump < 38;
+      if (patchLooksLikeFloor) {
+        const alpha = chromaJump < 4.5 ? 0.45 : 0.18;
+        model.r += (sampleR - model.r) * alpha;
+        model.g += (sampleG - model.g) * alpha;
+        model.b += (sampleB - model.b) * alpha;
+        const updated = rgbToYCbCr(model.r, model.g, model.b);
+        model.y = updated.y;
+        model.cb = updated.cb;
+        model.cr = updated.cr;
+        model.noise += (sampleNoise - model.noise) * alpha;
+        model.tex += (sampleTex - model.tex) * 0.15;
+        model.samples += 1;
+      }
     }
     floorR = model.r;
     floorG = model.g;
     floorB = model.b;
     floorNoise = model.noise;
+    floorTex = model.tex;
   }
 
   const floorHsv = rgbToHsv(floorR, floorG, floorB);
   const floorYcc = rgbToYCbCr(floorR, floorG, floorB);
 
-  const colorDistThresh = clamp(40 + floorNoise * 2.0, 42, 82);
-  const chromaBarrierThresh = clamp(15 + floorNoise * 0.45, 15, 28);
+  const colorDistThresh = clamp(32 + floorNoise * 1.5, 32, 68);
+  const chromaBarrierThresh = clamp(6.6 + floorNoise * 0.16, 6.6, 11.5);
   const shadowLumaThresh = clamp(62 + floorNoise * 2.1, 64, 108);
-  const edgeThresh = clamp(32 + floorNoise * 1.5, 34, 70);
-  const vertEdgeThresh = clamp(34 + floorNoise * 1.6, 36, 74);
+  const brightLumaThresh = clamp(28 + floorNoise * 0.9, 28, 46);
+  const edgeThresh = clamp(30 + floorNoise * 1.4, 30, 68);
+  const vertEdgeThresh = clamp(32 + floorNoise * 1.5, 32, 72);
 
   const yBottom = Math.floor(height * cal.bumperMaskY);
   const yHorizon = Math.min(yBottom - 4, Math.floor(height * cal.horizonY));
   const scanRows = Math.max(1, yBottom - yHorizon);
   const xStep = width >= 140 ? 2 : width >= 70 ? 2 : 1;
 
-  // Pixel obstacle classification helper (shadow-tolerant chromaticity + dual-axis edges)
+  // Pixel obstacle classification helper:
+  //   - Dark-only shadow tolerance (never classifies bright white walls/baseboards as shadows!)
+  //   - 4x4 micro-texture smoothness barrier (catches painted baseboards on textured carpet)
+  //   - Dual-axis edges (1-2 row baseboard seam + vertical chair/table legs)
   const classifyPixel = (
     x: number,
-    y: number
+    y: number,
+    depthFrac: number
   ): { blocked: boolean; verticalEdge: boolean } => {
-    const idx = (y * width + x) * 4;
+    const pIdx = y * width + x;
+    const idx = pIdx * 4;
     const r = rgba[idx];
     const g = rgba[idx + 1];
     const b = rgba[idx + 2];
 
     const pxYcc = rgbToYCbCr(r, g, b);
     const chromaDiff = Math.hypot(pxYcc.cb - floorYcc.cb, pxYcc.cr - floorYcc.cr);
-    const lumaDiff = Math.abs(pxYcc.y - floorYcc.y);
+    const dy = pxYcc.y - floorYcc.y;
+    const lumaDiff = Math.abs(dy);
 
     // Shadow-tolerant color test:
-    // If chroma closely matches the floor (e.g. a cast shadow), allow a larger luma drop before
-    // treating it as an obstacle; distinct chroma triggers cleanly at standard thresholds.
-    const sameChromaShadow = chromaDiff <= 10.5;
-    const colorBarrier = sameChromaShadow
+    // Only DARKER regions (dy < 0) with tightly preserved floor chromaticity pass as cast shadows.
+    // Brighter neutral white skirting boards / walls never qualify as shadows!
+    const isDarkShadow = dy < 0 && chromaDiff <= 5.2;
+    const meanRgbDiff = (Math.abs(r - floorR) + Math.abs(g - floorG) + Math.abs(b - floorB)) / 3;
+    const colorBarrier = isDarkShadow
       ? lumaDiff > shadowLumaThresh
       : chromaDiff > chromaBarrierThresh ||
-        (Math.abs(r - floorR) + Math.abs(g - floorG) + Math.abs(b - floorB)) / 3 > colorDistThresh;
+        (dy > brightLumaThresh && chromaDiff > 3.6) ||
+        meanRgbDiff > colorDistThresh;
+
+    // Micro-texture smoothness barrier: smooth painted walls/skirting boards on textured carpet
+    const localTex = blockTex[Math.min(bh - 1, y >> 2) * bw + Math.min(bw - 1, x >> 2)];
+    const expectedFloorTex = floorTex * (1 - depthFrac * 0.45);
+    const smoothWallHit =
+      floorTex >= 6.5 &&
+      localTex < expectedFloorTex * 0.36 &&
+      (chromaDiff > 4.0 || lumaDiff > 14);
 
     const pxHsv = rgbToHsv(r, g, b);
     const hueBarrier =
       pxHsv.s > 0.3 && floorHsv.s > 0.14 && hueDiffDeg(pxHsv.h, floorHsv.h) > 38;
     const satBarrier = Math.abs(pxHsv.s - floorHsv.s) > 0.36;
 
-    // Horizontal edge (baseboard / obstacle bottom) & Vertical edge (chair / table leg!)
-    const aboveIdx = (Math.max(0, y - 1) * width + x) * 4;
-    const leftIdx = (y * width + Math.max(0, x - xStep)) * 4;
-    const lCurr = (r * 77 + g * 150 + b * 29) >> 8;
-    const lAbove =
-      (rgba[aboveIdx] * 77 + rgba[aboveIdx + 1] * 150 + rgba[aboveIdx + 2] * 29) >> 8;
-    const lLeft =
-      (rgba[leftIdx] * 77 + rgba[leftIdx + 1] * 150 + rgba[leftIdx + 2] * 29) >> 8;
+    // Horizontal edge (baseboard / obstacle seam over 1-2 rows) & Vertical edge (chair / table leg!)
+    const lCurr = luma[pIdx];
+    const lAbove1 = luma[Math.max(0, y - 1) * width + x];
+    const lAbove2 = luma[Math.max(0, y - 2) * width + x];
+    const lLeft = luma[y * width + Math.max(0, x - xStep)];
 
-    const horizEdgeHit = Math.abs(lCurr - lAbove) > edgeThresh;
+    const horizEdgeHit =
+      Math.abs(lCurr - lAbove1) > edgeThresh || Math.abs(lCurr - lAbove2) > edgeThresh;
     const vertEdgeHit = Math.abs(lCurr - lLeft) > vertEdgeThresh;
 
     // A vertical edge combined with non-shadow chroma/color deviation catches narrow chair legs!
-    const legEdgeHit = vertEdgeHit && (!sameChromaShadow || lumaDiff > colorDistThresh * 0.75);
+    const legEdgeHit = vertEdgeHit && (!isDarkShadow || lumaDiff > colorDistThresh * 0.75);
 
     return {
-      blocked: colorBarrier || hueBarrier || satBarrier || horizEdgeHit || legEdgeHit,
-      verticalEdge: vertEdgeHit && (colorBarrier || hueBarrier || satBarrier || lumaDiff > 28),
+      blocked:
+        colorBarrier || smoothWallHit || hueBarrier || satBarrier || horizEdgeHit || legEdgeHit,
+      verticalEdge:
+        vertEdgeHit &&
+        (colorBarrier || smoothWallHit || hueBarrier || satBarrier || lumaDiff > 28),
     };
   };
 
@@ -476,7 +560,7 @@ export function analyzeFloorCorridors(
       let maxRunCols = 0;
 
       for (let x = sx0; x < sx1; x += xStep) {
-        const res = classifyPixel(x, y);
+        const res = classifyPixel(x, y, depthFrac);
         if (res.blocked) {
           blockedCols += xStep;
           runCols += xStep;
@@ -529,7 +613,7 @@ export function analyzeFloorCorridors(
     let bRun = 0;
     let bMaxRun = 0;
     for (let x = bx0; x < bx1; x += xStep) {
-      const res = classifyPixel(x, y);
+      const res = classifyPixel(x, y, depthFrac);
       if (res.blocked) {
         bBlocked += xStep;
         bRun += xStep;

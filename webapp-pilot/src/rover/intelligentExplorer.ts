@@ -38,6 +38,10 @@ export interface ExplorerTickInput {
   flowTurn?: number;
   /** Optional optical flow texture confidence [0..1] (allows detecting spinning treads on rugs!) */
   flowConfidence?: number;
+  /** Optional fused phone gyro heading in degrees [0..360) for turn-progress snag detection */
+  headingDeg?: number | null;
+  /** Optional phone yaw rate in deg/s */
+  yawRateDegS?: number;
   encA: number;
   encB: number;
   /** Optional measured Move Hub track speeds (-100..+100) */
@@ -105,19 +109,41 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+function shortestAngleDeltaDeg(toDeg: number, fromDeg: number): number {
+  let d = (toDeg - fromDeg) % 360;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return d;
+}
+
 export class IntelligentExplorer {
   private state: ExplorerFsmState = "CRUISING";
   private stateUntilMs = 0;
+  private avoidReverseUntilMs = 0;
+  private avoidReverseMaxUntilMs = 0;
+  private avoidInSpinPhase = false;
   private unstickReverseUntilMs = 0;
+  private unstickInSpinPhase = false;
   private unstickTier = 1;
   private avoidDir: -1 | 1 = 1;
   private turnCommitDir: -1 | 0 | 1 = 0;
   private turnCommitUntilMs = 0;
   private deadEndAccumMs = 0;
+  private sweptBlockedAccumMs = 0;
+  private bumpAccumMs = 0;
+  private pickedUpAccumMs = 0;
   private stuckAccumMs = 0;
   private lowBattAccumMs = 0;
   private lastTickMs = 0;
   private lastEncSum: number | null = null;
+  private progressRefMs = 0;
+  private progressRefHeadingDeg: number | null = null;
+  private progressNetFlow = 0;
+  private progressNetTurn = 0;
+  private progressSteerSum = 0;
+  private progressThrottleSum = 0;
+  private progressTicks = 0;
+  private progressConfidentTicks = 0;
   private recoveries = 0;
   private consecutiveRecoveries = 0;
   private lastRecoveryEndMs = -Infinity;
@@ -130,16 +156,24 @@ export class IntelligentExplorer {
   reset(): void {
     this.state = "CRUISING";
     this.stateUntilMs = 0;
+    this.avoidReverseUntilMs = 0;
+    this.avoidReverseMaxUntilMs = 0;
+    this.avoidInSpinPhase = false;
     this.unstickReverseUntilMs = 0;
+    this.unstickInSpinPhase = false;
     this.unstickTier = 1;
     this.avoidDir = 1;
     this.turnCommitDir = 0;
     this.turnCommitUntilMs = 0;
     this.deadEndAccumMs = 0;
+    this.sweptBlockedAccumMs = 0;
+    this.bumpAccumMs = 0;
+    this.pickedUpAccumMs = 0;
     this.stuckAccumMs = 0;
     this.lowBattAccumMs = 0;
     this.lastTickMs = 0;
     this.lastEncSum = null;
+    this.resetProgressWindow();
     this.recoveries = 0;
     this.consecutiveRecoveries = 0;
     this.lastRecoveryEndMs = -Infinity;
@@ -148,6 +182,17 @@ export class IntelligentExplorer {
     this.smoothedSteer = 0;
     this.smoothedThrottle = 0.45;
     this.hasStepped = false;
+  }
+
+  private resetProgressWindow(): void {
+    this.progressRefMs = 0;
+    this.progressRefHeadingDeg = null;
+    this.progressNetFlow = 0;
+    this.progressNetTurn = 0;
+    this.progressSteerSum = 0;
+    this.progressThrottleSum = 0;
+    this.progressTicks = 0;
+    this.progressConfidentTicks = 0;
   }
 
   getRecoveries(): number {
@@ -163,14 +208,14 @@ export class IntelligentExplorer {
       this.smoothedSteer = targetSteer;
       this.smoothedThrottle = targetThrottle;
     } else {
-      const aSteer = fast ? 0.55 : 0.34;
-      const aThrottle = fast ? 0.55 : 0.3;
+      const aSteer = fast ? 0.65 : 0.36;
+      const aThrottle = fast ? 0.65 : 0.32;
       this.smoothedSteer += (targetSteer - this.smoothedSteer) * aSteer;
       this.smoothedThrottle += (targetThrottle - this.smoothedThrottle) * aThrottle;
     }
     return {
-      steer: clamp(this.smoothedSteer, -0.92, 0.92),
-      throttle: clamp(this.smoothedThrottle, -0.75, 0.85),
+      steer: clamp(this.smoothedSteer, -0.95, 0.95),
+      throttle: clamp(this.smoothedThrottle, -0.85, 0.85),
     };
   }
 
@@ -232,10 +277,16 @@ export class IntelligentExplorer {
     }
     const lowBattery = this.lowBattAccumMs >= 3000;
 
-    // 1. Immediate hardware safety lockouts
-    if (input.safeMode || input.pickedUp) {
+    // 1. Hardware safety lockouts:
+    //    - safeMode is ALWAYS instant (0 ms)!
+    //    - pickedUp is debounced (>= 900 ms continuous) because plush carpet jolts carrying
+    //      a 283 g Pixel Fold briefly trip the Move Hub's 300 ms IMU tilt latch!
+    if (input.safeMode) {
+      this.pickedUpAccumMs = 0;
       this.stuckAccumMs = 0;
       this.deadEndAccumMs = 0;
+      this.sweptBlockedAccumMs = 0;
+      this.resetProgressWindow();
       this.hasStepped = false;
       return {
         state: "PAUSED",
@@ -243,9 +294,30 @@ export class IntelligentExplorer {
         right: 0,
         steer: 0,
         throttle: 0,
-        statusNote: input.safeMode
-          ? "Explorer paused — Safety Mode active."
-          : "Explorer paused — set tank back on floor.",
+        statusNote: "Explorer paused — Safety Mode active.",
+        lowBattery,
+        recoveries: this.recoveries,
+      };
+    }
+
+    if (input.pickedUp) {
+      this.pickedUpAccumMs += dtMs;
+    } else {
+      this.pickedUpAccumMs = Math.max(0, this.pickedUpAccumMs - dtMs * 2);
+    }
+    if (this.pickedUpAccumMs >= 900) {
+      this.stuckAccumMs = 0;
+      this.deadEndAccumMs = 0;
+      this.sweptBlockedAccumMs = 0;
+      this.resetProgressWindow();
+      this.hasStepped = false;
+      return {
+        state: "PAUSED",
+        left: 0,
+        right: 0,
+        steer: 0,
+        throttle: 0,
+        statusNote: "Explorer paused — set tank back on floor.",
         lowBattery,
         recoveries: this.recoveries,
       };
@@ -255,7 +327,8 @@ export class IntelligentExplorer {
     const effCorridors = this.applySemanticObstacles(input.corridors, input.objects);
     const leftClear = effCorridors[0] * 0.45 + effCorridors[1] * 0.55;
     // Fuse asymmetric swept-bumper clearance so a left-offset Pixel Fold camera never clips its right corner!
-    const centerClear = Math.min(effCorridors[2], input.sweptClear ?? effCorridors[2]);
+    const sweptVal = input.sweptClear ?? effCorridors[2];
+    const centerClear = Math.min(effCorridors[2], sweptVal);
     const rightClear = effCorridors[4] * 0.45 + effCorridors[3] * 0.55;
     const maxSideClear = Math.max(leftClear, rightClear);
     const frontierBias = input.mapper.getFrontierBias();
@@ -265,9 +338,11 @@ export class IntelligentExplorer {
       this.consecutiveRecoveries = 0;
     }
 
-    // 2. Dual-mode snag detection while cruising forward:
+    // 2. Multi-modal snag detection while cruising:
     //    (a) Motor-stall snag: wheels physically jammed (low encoder delta / zero measured speed)
-    //    (b) Wheel-spin snag: treads spinning on a rug/cord/baseboard while textured optical flow stays ~0!
+    //    (b) Wheel-spin snag: treads spinning on rug/cord while textured optical flow stays ~0
+    //    (c) Net-progress rocking snag: robot rocks ±1° in place against a doorframe with zero
+    //        net forward flow AND zero net gyro heading change over 1.5 s!
     const encSum = Math.abs(input.encA) + Math.abs(input.encB);
     const encSaturated =
       Math.abs(input.encA) >= ENC_SATURATION_THRESHOLD ||
@@ -303,10 +378,71 @@ export class IntelligentExplorer {
         this.stuckAccumMs = Math.max(0, this.stuckAccumMs - dtMs * 1.5);
       }
 
+      // Net-progress sliding window (immune to ±0.3 flow / ±15 deg/s rocking vibration in place!)
+      const hasHeading = typeof input.headingDeg === "number" && Number.isFinite(input.headingDeg);
+      let netProgressStuck = false;
+      if (this.progressRefMs === 0) {
+        this.progressRefMs = now;
+        this.progressRefHeadingDeg = hasHeading ? input.headingDeg! : null;
+        this.progressNetFlow = 0;
+        this.progressNetTurn = 0;
+        this.progressSteerSum = 0;
+        this.progressThrottleSum = 0;
+        this.progressTicks = 0;
+        this.progressConfidentTicks = 0;
+      } else {
+        const dtSec = dtMs / 1000;
+        this.progressNetFlow += input.flowForward * dtSec;
+        this.progressNetTurn += (input.flowTurn ?? 0) * dtSec;
+        this.progressSteerSum += Math.abs(this.smoothedSteer);
+        this.progressThrottleSum += Math.abs(this.smoothedThrottle);
+        this.progressTicks += 1;
+        if (hasConfidentFlow) this.progressConfidentTicks += 1;
+
+        const windowMs = now - this.progressRefMs;
+        if (windowMs >= 1500 && this.progressTicks >= 6) {
+          const avgSteer = this.progressSteerSum / this.progressTicks;
+          const avgThrottle = this.progressThrottleSum / this.progressTicks;
+          const mostlyConfidentFlow = this.progressConfidentTicks >= this.progressTicks * 0.5;
+          const netHeadingDeg =
+            hasHeading && this.progressRefHeadingDeg !== null
+              ? Math.abs(shortestAngleDeltaDeg(input.headingDeg!, this.progressRefHeadingDeg))
+              : null;
+
+          const turnPinned =
+            avgSteer >= 0.3 &&
+            netHeadingDeg !== null &&
+            netHeadingDeg < 10 &&
+            this.progressNetFlow < 0.42;
+          const forwardPinned =
+            mostlyConfidentFlow &&
+            avgThrottle >= 0.25 &&
+            this.progressNetFlow < 0.32 &&
+            (netHeadingDeg !== null ? netHeadingDeg < 12 : Math.abs(this.progressNetTurn) < 0.45);
+
+          if (turnPinned || forwardPinned) {
+            netProgressStuck = true;
+            stuckReason = motorStalled ? "motor-stall" : "wheel-spin";
+          } else {
+            // Genuine forward or turning progress made -> advance anchor window
+            this.progressRefMs = now;
+            this.progressRefHeadingDeg = hasHeading ? input.headingDeg! : null;
+            this.progressNetFlow = 0;
+            this.progressNetTurn = 0;
+            this.progressSteerSum = 0;
+            this.progressThrottleSum = 0;
+            this.progressTicks = 0;
+            this.progressConfidentTicks = 0;
+          }
+        }
+      }
+
       const stuckTriggerMs = stuckReason === "motor-stall" && hasSpeedTelem ? 1650 : 2100;
-      if (this.stuckAccumMs >= stuckTriggerMs) {
+      if (this.stuckAccumMs >= stuckTriggerMs || netProgressStuck) {
         this.stuckAccumMs = 0;
         this.deadEndAccumMs = 0;
+        this.sweptBlockedAccumMs = 0;
+        this.resetProgressWindow();
         this.recoveries += 1;
         this.consecutiveRecoveries += 1;
         this.unstickTier = clamp(this.consecutiveRecoveries, 1, 3);
@@ -315,14 +451,17 @@ export class IntelligentExplorer {
         const preferred = this.pickClearSide(leftClear, rightClear, frontierBias, now);
         this.avoidDir = this.unstickTier >= 2 ? ((-this.avoidDir) as -1 | 1) : preferred;
 
-        const revMs = this.unstickTier === 1 ? 550 : this.unstickTier === 2 ? 850 : 1050;
-        const turnMs = this.unstickTier === 1 ? 650 : this.unstickTier === 2 ? 750 : 950;
+        const revMs = this.unstickTier === 1 ? 720 : this.unstickTier === 2 ? 920 : 1100;
+        const turnMs = this.unstickTier === 1 ? 780 : this.unstickTier === 2 ? 920 : 1100;
         this.unstickReverseUntilMs = now + revMs;
+        this.unstickInSpinPhase = false;
         this.stateUntilMs = now + revMs + turnMs;
         this.state = "UNSTICKING";
 
-        this.smoothedSteer = -this.avoidDir * (this.unstickTier === 3 ? 0.25 : 0.38);
-        this.smoothedThrottle = this.unstickTier >= 2 ? -0.7 : -0.62;
+        // Instant snap to strong dual-tread reverse (zero forward EMA carryover!)
+        this.smoothedSteer = -this.avoidDir * 0.16;
+        this.smoothedThrottle = this.unstickTier >= 2 ? -0.82 : -0.76;
+        this.hasStepped = true;
         const m = mixXboxToTank(this.smoothedSteer, this.smoothedThrottle, cap);
         const reasonTag = stuckReason === "wheel-spin" ? "Rug/wheel-spin" : "Motor stall";
         return {
@@ -339,12 +478,12 @@ export class IntelligentExplorer {
       }
     }
 
-    // 3. Handle active UNSTICKING maneuver (escalating reverse -> forward/pivot escape arc)
+    // 3. Handle active UNSTICKING maneuver (dual-tread reverse -> counter-rotating carpet escape spin!)
     if (this.state === "UNSTICKING") {
       if (now < this.unstickReverseUntilMs) {
         const s = this.smoothOutput(
-          -this.avoidDir * (this.unstickTier === 3 ? 0.25 : 0.38),
-          this.unstickTier >= 2 ? -0.7 : -0.62,
+          -this.avoidDir * 0.16,
+          this.unstickTier >= 2 ? -0.82 : -0.76,
           true
         );
         const m = mixXboxToTank(s.steer, s.throttle, cap);
@@ -360,9 +499,14 @@ export class IntelligentExplorer {
         };
       }
       if (now < this.stateUntilMs) {
-        // Tier 3 uses a decisive high-steer escape spin so tight furniture traps never loop
-        const escSteer = this.avoidDir * (this.unstickTier === 3 ? 0.9 : this.unstickTier === 2 ? 0.78 : 0.68);
-        const escThrottle = this.unstickTier === 3 ? 0.14 : 0.46;
+        // Counter-rotating tank pivot on ALL tiers so plush carpet never stalls a 1-tread turn!
+        const escSteer = this.avoidDir * (this.unstickTier === 3 ? 0.95 : 0.9);
+        const escThrottle = 0.05;
+        if (!this.unstickInSpinPhase) {
+          this.unstickInSpinPhase = true;
+          this.smoothedSteer = escSteer;
+          this.smoothedThrottle = escThrottle;
+        }
         const s = this.smoothOutput(escSteer, escThrottle, true);
         const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
@@ -371,12 +515,13 @@ export class IntelligentExplorer {
           right: m.right,
           steer: s.steer,
           throttle: s.throttle,
-          statusNote: `Unstick #${this.recoveries} (Tier ${this.unstickTier}) — curving onto open floor…`,
+          statusNote: `Unstick #${this.recoveries} (Tier ${this.unstickTier}) — spinning onto open floor…`,
           lowBattery,
           recoveries: this.recoveries,
         };
       }
       this.lastRecoveryEndMs = now;
+      this.resetProgressWindow();
       this.state = input.mission === "return-home" ? "RETURNING_HOME" : "CRUISING";
     }
 
@@ -441,28 +586,72 @@ export class IntelligentExplorer {
       }
     }
 
-    // 5. True emergency dead-end / unobstructed 88007 impact check (debounced to ignore single-frame noise)
-    const immediateImpact = input.bump || input.frontDistancePct <= 20;
-    const allLanesDeadEnd = centerClear < 0.14 && maxSideClear < 0.24;
+    // 5. True emergency obstacle / unobstructed 88007 impact check:
+    //    - Filter single 300 ms Move Hub carpet-jolt IMU bumps when rolling briskly across wide-open floor
+    //    - Trigger AVOIDING early on close 88007 (<= 26%), sustained swept-path block (< 0.18), or dead-end
+    if (input.bump) {
+      this.bumpAccumMs += dtMs;
+    } else {
+      this.bumpAccumMs = 0;
+    }
+    const treadsMovingBriskly =
+      typeof input.speedA === "number" &&
+      typeof input.speedB === "number" &&
+      Math.abs(input.speedA) + Math.abs(input.speedB) >= 45;
+    const confirmedBump =
+      input.bump &&
+      (input.frontDistancePct <= 65 ||
+        centerClear < 0.55 ||
+        (!treadsMovingBriskly && Math.abs(input.flowForward) < 0.25) ||
+        this.bumpAccumMs >= 550);
+
+    const immediateImpact = confirmedBump || input.frontDistancePct <= 26;
+    const sweptBlocked = sweptVal < 0.18 || (input.frontDistancePct <= 30 && centerClear < 0.35);
+    if (sweptBlocked) {
+      this.sweptBlockedAccumMs += dtMs;
+    } else {
+      this.sweptBlockedAccumMs = Math.max(0, this.sweptBlockedAccumMs - dtMs * 2);
+    }
+
+    const allLanesDeadEnd = centerClear < 0.16 && maxSideClear < 0.28;
     if (allLanesDeadEnd) {
       this.deadEndAccumMs += dtMs;
     } else {
       this.deadEndAccumMs = Math.max(0, this.deadEndAccumMs - dtMs * 2);
     }
 
-    const mustReverse = immediateImpact || this.deadEndAccumMs >= 320;
+    const mustReverse =
+      immediateImpact || this.sweptBlockedAccumMs >= 220 || this.deadEndAccumMs >= 260;
     if (mustReverse && this.state !== "AVOIDING") {
       this.state = "AVOIDING";
       this.deadEndAccumMs = 0;
+      this.sweptBlockedAccumMs = 0;
+      this.resetProgressWindow();
       this.avoidDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
-      this.stateUntilMs = now + 820;
+      this.avoidReverseUntilMs = now + 680;
+      this.avoidReverseMaxUntilMs = now + 1350;
+      this.avoidInSpinPhase = false;
+      this.stateUntilMs = now + 1450;
+
+      // Instant snap to strong dual-tread reverse (NO forward EMA carryover!)
+      this.smoothedSteer = -this.avoidDir * 0.16;
+      this.smoothedThrottle = -0.78;
+      this.hasStepped = true;
     }
 
     if (this.state === "AVOIDING") {
-      const rem = this.stateUntilMs - now;
-      const stillTooClose = input.bump || input.frontDistancePct <= 26;
-      if (stillTooClose || rem > 440) {
-        const s = this.smoothOutput(-this.avoidDir * 0.45, -0.56, true);
+      const stillTooClose =
+        confirmedBump || input.frontDistancePct <= 34 || sweptVal < 0.18;
+      const inReversePhase =
+        now < this.avoidReverseUntilMs ||
+        (stillTooClose && now < this.avoidReverseMaxUntilMs);
+
+      if (inReversePhase) {
+        // Ensure full spin phase remains after extended reversing finishes
+        if (now >= this.avoidReverseUntilMs) {
+          this.stateUntilMs = Math.max(this.stateUntilMs, now + 720);
+        }
+        const s = this.smoothOutput(-this.avoidDir * 0.16, -0.78, true);
         const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "AVOIDING",
@@ -471,16 +660,27 @@ export class IntelligentExplorer {
           steer: s.steer,
           throttle: s.throttle,
           statusNote:
-            input.frontDistancePct <= 26
-              ? `Front sensor ${input.frontDistancePct}% — reversing clear in an arc`
-              : "Dead-end / bumper close — reversing smoothly in an arc",
+            input.frontDistancePct <= 34
+              ? `Front sensor ${input.frontDistancePct}% — backing clear with both treads`
+              : "Obstacle close — backing clear with both treads",
           discovery: discoveryOut,
           lowBattery,
           recoveries: this.recoveries,
         };
       }
-      if (rem > 0 && centerClear < 0.36) {
-        const s = this.smoothOutput(this.avoidDir * 0.68, 0.44, true);
+
+      const rem = this.stateUntilMs - now;
+      const clearlyOpen = centerClear >= 0.52 && input.frontDistancePct >= 50;
+      if (rem > 0 && !(rem < 300 && clearlyOpen)) {
+        // Counter-rotating carpet spin away from the obstacle (both treads active in opposite directions!)
+        const spinSteer = this.avoidDir * 0.9;
+        const spinThrottle = 0.04;
+        if (!this.avoidInSpinPhase) {
+          this.avoidInSpinPhase = true;
+          this.smoothedSteer = spinSteer;
+          this.smoothedThrottle = spinThrottle;
+        }
+        const s = this.smoothOutput(spinSteer, spinThrottle, true);
         const m = mixXboxToTank(s.steer, s.throttle, cap);
         return {
           state: "AVOIDING",
@@ -488,12 +688,13 @@ export class IntelligentExplorer {
           right: m.right,
           steer: s.steer,
           throttle: s.throttle,
-          statusNote: `Carving ${this.avoidDir > 0 ? "right" : "left"} around obstacle`,
+          statusNote: `Pivoting ${this.avoidDir > 0 ? "right" : "left"} clear of obstacle`,
           discovery: discoveryOut,
           lowBattery,
           recoveries: this.recoveries,
         };
       }
+      this.resetProgressWindow();
       this.state = input.mission === "return-home" ? "RETURNING_HOME" : "CRUISING";
     }
 
@@ -522,11 +723,13 @@ export class IntelligentExplorer {
           : 0;
       const targetSteer = clamp(
         homeSteer * 0.55 + input.bestSteer * 0.3 + obstaclePull * 0.45,
-        -0.85,
-        0.85
+        -0.88,
+        0.88
       );
       const targetThrottle =
-        Math.abs(home.turnErrorDeg) > 95 ? 0.36 : clamp(0.45 + centerClear * 0.3, 0.42, 0.74);
+        Math.abs(home.turnErrorDeg) > 95
+          ? 0.12
+          : clamp(0.45 + centerClear * 0.3, 0.42, 0.74);
       const s = this.smoothOutput(targetSteer, targetThrottle);
       const m = mixXboxToTank(s.steer, s.throttle, cap);
       return {
@@ -541,16 +744,21 @@ export class IntelligentExplorer {
       };
     }
 
-    // 7. Continuous Smooth Forward Cruising — curves gracefully around obstacles WITHOUT stopping!
+    // 7. Continuous Smooth Forward Cruising — curves gracefully on open floor,
+    //    and counter-rotates cleanly on carpet when tightly approaching an obstacle!
     this.state = "CRUISING";
 
-    const visionPressure = clamp((0.62 - centerClear) / 0.48, 0, 1);
+    const visionPressure = clamp((0.64 - centerClear) / 0.48, 0, 1);
     const bumperPressure =
-      input.frontDistancePct <= 60 ? clamp((60 - input.frontDistancePct) / 40, 0, 1) : 0;
+      input.frontDistancePct <= 60 ? clamp((60 - input.frontDistancePct) / 36, 0, 1) : 0;
     const avoidPressure = Math.max(visionPressure, bumperPressure);
+    const tightPivot = centerClear < 0.24 || input.frontDistancePct <= 34;
 
     let targetSteer = input.bestSteer * 0.65 + frontierBias * 0.25;
-    if (avoidPressure > 0.12) {
+    if (tightPivot) {
+      const clearDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
+      targetSteer = clearDir * 0.9;
+    } else if (avoidPressure > 0.12) {
       const clearDir = this.pickClearSide(leftClear, rightClear, frontierBias, now);
       targetSteer = clamp(
         targetSteer * (1 - avoidPressure * 0.5) + clearDir * (0.36 + avoidPressure * 0.5),
@@ -561,25 +769,25 @@ export class IntelligentExplorer {
       targetSteer = clamp(targetSteer, -0.72, 0.72);
     }
 
-    // Smooth forward throttle floor (slows cleanly in tight aisles without halting)
-    const targetThrottle = clamp(
-      0.46 + centerClear * 0.32 - avoidPressure * 0.16,
-      0.38,
-      0.78
-    );
+    // Smooth forward curve on open/moderate aisles; counter-rotating tank pivot when tight
+    const targetThrottle = tightPivot
+      ? 0.08
+      : clamp(0.46 + centerClear * 0.32 - avoidPressure * 0.16, 0.38, 0.78);
 
-    const s = this.smoothOutput(targetSteer, targetThrottle);
+    const s = this.smoothOutput(targetSteer, targetThrottle, tightPivot);
     const m = mixXboxToTank(s.steer, s.throttle, cap);
 
     const baseNote = discoveryOut
       ? `Spotted ${discoveryOut.label} — logged on the fly!`
-      : avoidPressure > 0.3
-        ? `Curving ${s.steer >= 0 ? "right" : "left"} smoothly around obstacle`
-        : input.mission === "find-person"
-          ? "Cruising smoothly · Searching for a person…"
-          : input.mission === "find-object"
-            ? "Cruising smoothly · Logging landmarks on the fly…"
-            : "Cruising open floor · Mapping room smoothly";
+      : tightPivot
+        ? `Counter-rotating ${s.steer >= 0 ? "right" : "left"} away from tight obstacle`
+        : avoidPressure > 0.3
+          ? `Curving ${s.steer >= 0 ? "right" : "left"} smoothly around obstacle`
+          : input.mission === "find-person"
+            ? "Cruising smoothly · Searching for a person…"
+            : input.mission === "find-object"
+              ? "Cruising smoothly · Logging landmarks on the fly…"
+              : "Cruising open floor · Mapping room smoothly";
 
     return {
       state: "CRUISING",
