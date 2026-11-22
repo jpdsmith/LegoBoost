@@ -3372,3 +3372,467 @@ a:focus-visible {
   }
 }
 
+/* ==================================================
+   PIXEL FOLD (2023) 90° TABLETOP ON-BOARD AUTO-PILOT
+   ================================================== */
+
+.fold-cockpit {
+  --fold-top-pct: 48%;
+  display: grid;
+  grid-template-rows: minmax(270px, 44vh) auto auto;
+  gap: 0;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-deck);
+}
+
+.fold-cockpit.is-fullscreen-fold {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  height: 100dvh;
+  width: 100vw;
+  border-radius: 0;
+  border: none;
+  grid-template-rows: var(--fold-top-pct, 48%) 28px minmax(0, 1fr);
+}
+
+/* Automatic hardware fold alignment when Chrome exposes Foldable Viewport Segments API */
+@media (vertical-viewport-segments: 2) {
+  .fold-cockpit.is-fullscreen-fold {
+    grid-template-rows:
+      env(viewport-segment-height 0 0)
+      max(24px, calc(env(viewport-segment-top 0 1) - env(viewport-segment-bottom 0 0)))
+      env(viewport-segment-height 0 1);
+  }
+}
+
+/* TOP HALF: Vertical Upright Visor (above 90° fold crease) */
+.fold-top-visor {
+  display: grid;
+  grid-template-columns: minmax(0, 1.85fr) minmax(215px, 0.95fr);
+  gap: 10px;
+  padding: 10px;
+  background: var(--surface-visor);
+  color: var(--ink-visor);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.fold-camera-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  border-radius: var(--radius-md);
+  background: radial-gradient(circle at 50% 45%, #1c2432 0%, #0b0f17 82%);
+  border: 1.5px solid var(--border-visor);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fold-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+}
+
+.fold-video.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fold-camera-standby {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 20px;
+  max-width: 440px;
+  color: var(--ink-visor);
+}
+
+.fold-camera-standby h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+}
+
+.fold-camera-standby p {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-visor-muted);
+  line-height: 1.45;
+}
+
+.fold-tag-toast {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(234, 88, 12, 0.94);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+.fold-visor-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface-visor-top);
+  border: 1px solid var(--border-visor);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+}
+
+.fold-visor-side .map-card {
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.fold-visor-side .map-title {
+  color: var(--ink-visor);
+  font-size: 0.84rem;
+}
+
+.fold-visor-side .map-canvas-wrap {
+  max-height: 185px;
+  margin: 0 auto;
+}
+
+.fold-visor-side .map-stats-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.fold-visor-side .map-stats-grid > div {
+  background: rgba(15, 20, 29, 0.75);
+  border-color: var(--border-visor);
+  padding: 4px 6px;
+  gap: 1px;
+}
+
+.fold-visor-side .map-stats-grid .engraved-label {
+  color: var(--ink-visor-muted);
+  font-size: 0.58rem;
+}
+
+.fold-visor-side .map-stats-grid strong {
+  color: #f8fafc;
+  font-size: 0.76rem;
+}
+
+.fold-mini-telemetry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-visor);
+  font-size: 0.7rem;
+  color: var(--ink-visor-muted);
+}
+
+.fold-mini-telemetry strong {
+  color: #7dd3fc;
+}
+
+/* HINGE SAFE BAND (90° Pixel Fold horizontal bend — zero interactive buttons!) */
+.fold-hinge-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+  padding: 4px 14px;
+  background: linear-gradient(180deg, #1b2230 0%, #101520 50%, #1d2432 100%);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  font-size: 0.74rem;
+  font-weight: 700;
+  user-select: none;
+}
+
+.fold-hinge-indicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.fold-dot {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  color: #94a3b8;
+}
+
+.fold-dot.is-on {
+  background: rgba(34, 197, 94, 0.24);
+  color: #86efac;
+}
+
+.fold-hinge-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+/* BOTTOM HALF: Flat Horizontal Touch Deck (resting flat on the tank) */
+.fold-bottom-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--surface-deck);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.fold-primary-paddles {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fold-paddle-main {
+  flex: 1.5;
+  min-width: 185px;
+  min-height: 46px;
+  font-size: 0.94rem;
+}
+
+.fold-paddle-stop {
+  flex: 0.9;
+  min-width: 112px;
+  min-height: 46px;
+  font-size: 0.94rem;
+}
+
+.fold-control-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fold-chip-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Flight Recorder & 1-Tap Problem Tagger */
+.fold-recorder-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1.5px solid var(--border-hairline);
+}
+
+.fold-recorder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fold-recorder-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fold-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.fold-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fold-problem-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fold-tag-btn {
+  cursor: pointer;
+  min-height: 36px;
+  padding: 6px 11px;
+  border-radius: var(--radius-xs);
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-deck);
+  color: var(--ink-primary);
+  font-size: 0.77rem;
+  font-weight: 800;
+  box-shadow: 0 2px 0 rgba(24, 28, 36, 0.08);
+  transition: transform 70ms ease, background-color 120ms ease;
+}
+
+.fold-tag-btn:active {
+  transform: translateY(1px);
+}
+
+.fold-tag-btn.tone-danger {
+  background: var(--red-soft);
+  border-color: hsl(0, 68%, 74%);
+  color: var(--red-deep);
+}
+
+.fold-tag-btn.tone-warn {
+  background: var(--amber-soft);
+  border-color: hsl(38, 72%, 68%);
+  color: var(--amber-deep);
+}
+
+.fold-tag-btn.tone-good {
+  background: var(--green-soft);
+  border-color: hsl(142, 54%, 68%);
+  color: var(--green-deep);
+}
+
+.fold-export-notice {
+  font-size: 0.77rem;
+  font-weight: 700;
+  color: var(--azure-deep);
+  background: var(--azure-soft);
+  border: 1px solid hsl(199, 68%, 78%);
+  border-radius: var(--radius-xs);
+  padding: 6px 10px;
+}
+
+/* Calibration Drawer */
+.fold-calibration-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md);
+  background: var(--bg-well);
+  box-shadow: var(--shadow-well);
+}
+
+.fold-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 14px;
+}
+
+.fold-slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.77rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.fold-slider-field strong {
+  color: var(--ink-primary);
+}
+
+.fold-slider-field input[type="range"] {
+  width: 100%;
+  accent-color: var(--orange);
+}
+
+.fold-cal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fold-lens-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Compact discovery thumbnail ribbon */
+.fold-discovery-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.fold-disc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 4px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-hairline);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.fold-disc-thumb {
+  width: 34px;
+  height: 22px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+@media (max-width: 680px) {
+  .fold-top-visor {
+    grid-template-columns: 1fr;
+  }
+
+  .fold-visor-side {
+    display: none;
+  }
+}
+
+

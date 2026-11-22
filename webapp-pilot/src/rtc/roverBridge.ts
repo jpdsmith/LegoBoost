@@ -51,11 +51,27 @@ export interface DetectedObjectBox {
 export interface RoverVisionSnapshot {
   /** 5-sector free-floor clearance [farLeft, midLeft, center, midRight, farRight] in [0..1] */
   corridors: [number, number, number, number, number];
+  /** Normalized Y [0..1] of deepest clear floor row per corridor */
+  horizonYs?: [number, number, number, number, number];
+  /** Free-floor clearance specifically across the asymmetric swept robot bumper path [0..1] */
+  sweptClear?: number;
   /** Recommended open-space steering [-1..+1] */
   bestSteer: number;
   /** Optical flow forward motion estimate & stuck detection */
   flowForward: number;
+  /** Optical flow horizontal yaw estimate (positive = turning right) */
+  flowTurn?: number;
+  /** Optical flow texture confidence [0..1] (0 = featureless wall/floor) */
+  flowConfidence?: number;
+  /** Number of textured patches matched in optical flow */
+  validFlowPatches?: number;
   stuck: boolean;
+  /** Learned floor sample RGB + noise + mean frame luma for HUD & Flight Recorder */
+  floorRgb?: [number, number, number];
+  floorNoise?: number;
+  avgLuma?: number;
+  /** Normalized [0..1] floor sample patch rectangle for visual verification */
+  floorPatch?: { x: number; y: number; w: number; h: number };
   /** Lane / floor tape center offset [-1..+1] or null */
   laneOffset: number | null;
   /** Active locked target (tap-to-follow or AI) */

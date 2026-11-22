@@ -43,11 +43,24 @@ import { OnDeviceObjectDetector } from "../vision/aiObjectDetector";
 import {
   analyzeFloorCorridors,
   computeOpticalFlow,
+  createFloorModel,
   detectFloorLaneOffset,
   HsvLockModel,
+  loadMountCalibration,
+  MountCalibration,
   sampleHsvTarget,
+  saveMountCalibration,
   trackHsvTarget,
 } from "../vision/roverVision";
+import {
+  FlightRecorder,
+  FlightRunStats,
+  PROBLEM_TAGS,
+  ProblemTagKind,
+  shareOrDownloadFile,
+} from "../rover/flightRecorder";
+import { FoldHeadingSnapshot, FoldHeadingTracker } from "../rover/foldHeading";
+import { FoldAutoPilotView, RearCameraOption } from "./FoldAutoPilotView";
 import { FpvOverlaySvg } from "./FpvOverlaySvg";
 import {
   IconCamera,
@@ -94,7 +107,7 @@ export interface RoverCockpitStationProps {
   onStopMacro: () => Promise<void>;
 }
 
-type RoverSubView = "driver" | "host" | "voice";
+type RoverSubView = "fold" | "driver" | "host" | "voice";
 
 interface SpeechRecognitionEventLike {
   results: ArrayLike<{ isFinal?: boolean; 0?: { transcript?: string } }>;
@@ -133,6 +146,17 @@ const EMPTY_XBOX: XboxDriveSample = {
   actions: [],
 };
 
+const EMPTY_HEADING: FoldHeadingSnapshot = {
+  headingDeg: null,
+  yawRateDegS: 0,
+  source: "none",
+  mountPitchDeg: null,
+  mountRollDeg: null,
+  rawAlpha: null,
+  rawBeta: null,
+  rawGamma: null,
+};
+
 const SPEED_STEPS = [40, 65, 85, 100];
 const QUICK_PHRASES = [
   "Hello Vernie",
@@ -148,8 +172,8 @@ const EXPLORER_MISSIONS: Array<{ id: ExplorerMission; label: string; sub: string
   { id: "find-object", label: "Find Objects", sub: "Log landmarks on the fly" },
   { id: "return-home", label: "Return Home", sub: "Curve back to start" },
 ];
-const VISION_W = 80;
-const VISION_H = 60;
+const VISION_W = 160;
+const VISION_H = 120;
 
 function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === "undefined") return null;
@@ -166,11 +190,11 @@ function compassLabel(deg: number): string {
   return `${Math.round(norm)}° ${dirs[Math.round(norm / 45) % 8]}`;
 }
 
-function isLikelyAndroidPhone(): boolean {
+function isLikelyAndroidDevice(): boolean {
   if (typeof navigator === "undefined") return false;
   if (isMetaQuestBrowser()) return false;
   const ua = navigator.userAgent || "";
-  return /Android/i.test(ua) && /Mobile/i.test(ua);
+  return /Android/i.test(ua);
 }
 
 function readInitialQueryParams(): { subView: RoverSubView; joinCode: string; autoJoin: boolean } {
@@ -181,13 +205,14 @@ function readInitialQueryParams(): { subView: RoverSubView; joinCode: string; au
     const params = new URLSearchParams(window.location.search);
     const role = params.get("role");
     const join = params.get("join");
+    if (role === "fold") return { subView: "fold", joinCode: "", autoJoin: false };
     if (role === "host") return { subView: "host", joinCode: "", autoJoin: false };
     if (join) {
       const clean = normalizeRoomCode(join);
       return { subView: "driver", joinCode: clean, autoJoin: clean.length >= 3 };
     }
     return {
-      subView: isLikelyAndroidPhone() ? "host" : "driver",
+      subView: isLikelyAndroidDevice() ? "fold" : "driver",
       joinCode: "",
       autoJoin: false,
     };
@@ -294,13 +319,30 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const [transportMode, setTransportMode] = useState<BridgeTransportMode>("none");
   const [bridgeDiag, setBridgeDiag] = useState<BridgeDiagnostics | null>(null);
 
-  // Android Rover Host state
+  // Android Rover Host & Pixel Fold On-Board Auto-Pilot state
   const [hostActive, setHostActive] = useState(false);
   const [hostCameraActive, setHostCameraActive] = useState(false);
   const [hostCameraError, setHostCameraError] = useState<string | null>(null);
   const [hostTorchSupported, setHostTorchSupported] = useState(false);
   const [hostWakeLocked, setHostWakeLocked] = useState(false);
   const [phoneHeadingDeg, setPhoneHeadingDeg] = useState<number | null>(null);
+  const [foldHeading, setFoldHeading] = useState<FoldHeadingSnapshot>(EMPTY_HEADING);
+  const [calibration, setCalibration] = useState<MountCalibration>(() => loadMountCalibration());
+  const [rearCameras, setRearCameras] = useState<RearCameraOption[]>([]);
+  const [autoHeadlights, setAutoHeadlights] = useState<boolean>(true);
+  const [autoRecord, setAutoRecord] = useState<boolean>(true);
+  const [visionMs, setVisionMs] = useState<number>(0);
+  const [foldMotorCmd, setFoldMotorCmd] = useState<{ left: number; right: number; steer: number }>({
+    left: 0,
+    right: 0,
+    steer: 0,
+  });
+  const [lastTagFeedback, setLastTagFeedback] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState<boolean>(false);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [runStats, setRunStats] = useState<FlightRunStats>(() =>
+    new FlightRecorder(loadMountCalibration()).getStats()
+  );
 
   // Voice Commander state
   const speechSupported = Boolean(getSpeechRecognitionCtor());
@@ -348,6 +390,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const driveCtrlRef = useRef(new IntelligentDriveController());
   const explorerRef = useRef(new IntelligentExplorer());
   const mapperRef = useRef(new RoomMapper());
+  const headingTrackerRef = useRef(new FoldHeadingTracker());
+  const floorModelRef = useRef(createFloorModel());
+  const recorderRef = useRef(new FlightRecorder(loadMountCalibration()));
   const aiDetectorRef = useRef(new OnDeviceObjectDetector());
   const prevLumaRef = useRef<Uint8Array | null>(null);
   const hsvLockRef = useRef<HsvLockModel | null>(null);
@@ -356,6 +401,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   const latestAiBoxesRef = useRef<DetectedObjectBox[]>([]);
   const lastAiRunRef = useRef<number>(0);
   const lastMapPushRef = useRef<number>(0);
+  const lastLoopMsRef = useRef<number>(0);
+  const lastAutoTorchSwitchRef = useRef<number>(0);
+  const tagToastTimerRef = useRef<number | null>(null);
   const hostAssistNoteRef = useRef<string>("Smart Co-Pilot ready");
   const hostInterveningRef = useRef<string>("none");
   const hostDriverInputRef = useRef<{ steer: number; throttle: number; at: number }>({
@@ -388,6 +436,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     distancePct,
     telemetry,
     headlightsOn,
+    autoHeadlights,
     speedCap,
     assistMode,
     collisionGuard,
@@ -397,6 +446,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     mission,
     hostTorchSupported,
     phoneHeadingDeg,
+    calibration,
     ttsEnabled,
   });
   liveRef.current = {
@@ -410,6 +460,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     distancePct,
     telemetry,
     headlightsOn,
+    autoHeadlights,
     speedCap,
     assistMode,
     collisionGuard,
@@ -419,6 +470,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     mission,
     hostTorchSupported,
     phoneHeadingDeg,
+    calibration,
     ttsEnabled,
   };
 
@@ -485,18 +537,19 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     };
   }, [isRemoteDriverLive, subView]);
 
-  // Lazy-load AI Object Detector when toggled ON on Host
+  // Lazy-load AI Object Detector when toggled ON on Host or Fold Auto-Pilot
   useEffect(() => {
     if (!aiEnabled) {
       setAiStatusNote(null);
       return;
     }
-    if (subView === "host" || hostCameraActive) {
+    if (subView === "fold" || subView === "host" || hostCameraActive) {
       setAiStatusNote("Loading on-device EfficientDet-Lite0 model…");
       void aiDetectorRef.current.load().then((ok) => {
+        const del = aiDetectorRef.current.getDelegate();
         setAiStatusNote(
           ok
-            ? "On-device AI Vision ready (80 object classes)"
+            ? `On-device AI Vision ready (80 classes · ${del ?? "GPU"})`
             : aiDetectorRef.current.getError() ?? "AI Vision unavailable offline"
         );
       });
@@ -867,13 +920,13 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     };
   }, [applyHostTorch, handleTapSampleLocal, initParams.autoJoin, initParams.joinCode]);
 
-  // Re-attach live MediaStream whenever switching back to Driver or Host subViews
+  // Re-attach live MediaStream whenever switching back to Fold, Driver, or Host subViews
   useEffect(() => {
     if (subView === "driver" && remoteStreamRef.current && remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = remoteStreamRef.current;
       void remoteVideoRef.current.play().catch(() => undefined);
     }
-    if (subView === "host" && hostStreamRef.current && hostVideoRef.current) {
+    if ((subView === "host" || subView === "fold") && hostStreamRef.current && hostVideoRef.current) {
       hostVideoRef.current.srcObject = hostStreamRef.current;
       void hostVideoRef.current.play().catch(() => undefined);
     }
@@ -955,9 +1008,11 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     return () => window.clearInterval(id);
   }, [hostActive]);
 
-  // Android Rover Host: 10 Hz Vision + 2D Room Mapping + Co-Pilot Pursuit + Smooth Continuous Auto Explorer!
+  // Unified 10 Hz On-Device Vision + 2D Room Mapping + Co-Pilot + Smooth Continuous Auto Explorer + Flight Recorder!
+  // Runs in BOTH zero-WiFi Pixel Fold 90° Auto-Pilot mode (hostCameraActive) AND Wi-Fi FPV Host mode (hostActive).
+  const onBoardLoopActive = hostActive || hostCameraActive;
   useEffect(() => {
-    if (!hostActive) return;
+    if (!onBoardLoopActive) return;
     const vc = visionCanvasRef.current ?? document.createElement("canvas");
     vc.width = VISION_W;
     vc.height = VISION_H;
@@ -970,29 +1025,67 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
 
     const id = window.setInterval(() => {
+      const tStart = performance.now();
       const video = hostVideoRef.current;
       const st = liveRef.current;
       const now = Date.now();
+      const dtMs = lastLoopMsRef.current > 0 ? Math.max(20, Math.min(350, now - lastLoopMsRef.current)) : 100;
+      lastLoopMsRef.current = now;
 
       let corridors: [number, number, number, number, number] = [0.85, 0.85, 0.85, 0.85, 0.85];
+      let horizonYs: [number, number, number, number, number] = [0.5, 0.5, 0.5, 0.5, 0.5];
+      let sweptClear = 0.85;
       let bestSteer = 0;
-      let flowForward = 0.5;
+      let floorRgb: [number, number, number] = [140, 130, 115];
+      let floorNoise = 12;
+      let avgLuma = 128;
+      let floorPatch: { x: number; y: number; w: number; h: number } | undefined;
+      let flowForward = 0;
+      let flowTurn = 0;
+      let flowConfidence = 0;
+      let validFlowPatches = 0;
       let laneOffset: number | null = null;
       const objects: DetectedObjectBox[] = [];
       let lockedTarget: DetectedObjectBox | null = null;
 
       if (ctx && video && video.readyState >= 2) {
+        // Freeze persistent floor model when inches from a wall so walls never poison floor color!
+        const safeToLearnFloor = st.distancePct > 28 && !st.pickedUp;
         ctx.drawImage(video, 0, 0, VISION_W, VISION_H);
         const img = ctx.getImageData(0, 0, VISION_W, VISION_H);
-        const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H);
+        const floor = analyzeFloorCorridors(img.data, VISION_W, VISION_H, {
+          calibration: st.calibration,
+          floorModel: floorModelRef.current,
+          allowFloorUpdate: safeToLearnFloor,
+        });
         const flow = computeOpticalFlow(prevLumaRef.current, img.data, VISION_W, VISION_H);
         prevLumaRef.current = flow.luma;
         corridors = floor.corridors;
+        horizonYs = floor.horizonYs;
+        sweptClear = floor.sweptClear;
         bestSteer = floor.bestSteer;
+        floorRgb = floor.floorRgb;
+        floorNoise = floor.floorNoise;
+        avgLuma = floor.avgLuma;
+        floorPatch = floor.floorPatch;
         flowForward = flow.flowForward;
+        flowTurn = flow.flowTurn;
+        flowConfidence = flow.confidence;
+        validFlowPatches = flow.validPatches;
         laneOffset = st.laneAssist ? detectFloorLaneOffset(img.data, VISION_W, VISION_H) : null;
 
-        if (st.aiEnabled && aiDetectorRef.current.isReady() && now - lastAiRunRef.current >= 240) {
+        // Auto-Headlights in dim rooms / under furniture (with 5 s hysteresis so LED never flickers)
+        if (st.autoHeadlights && st.hostTorchSupported && now - lastAutoTorchSwitchRef.current > 5000) {
+          if (!st.headlightsOn && avgLuma < 44) {
+            lastAutoTorchSwitchRef.current = now;
+            void applyHostTorch(true);
+          } else if (st.headlightsOn && avgLuma > 96) {
+            lastAutoTorchSwitchRef.current = now;
+            void applyHostTorch(false);
+          }
+        }
+
+        if (st.aiEnabled && aiDetectorRef.current.isReady() && now - lastAiRunRef.current >= 220) {
           lastAiRunRef.current = now;
           latestAiBoxesRef.current = aiDetectorRef.current.detectVideo(video, performance.now());
         } else if (!st.aiEnabled) {
@@ -1011,24 +1104,38 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         }
       }
 
-      // Update live 2D Occupancy Room Map
+      const headingSnap = headingTrackerRef.current.getSnapshot();
+      const activeHeadingDeg = headingSnap.headingDeg ?? st.phoneHeadingDeg;
+
+      // Update live 2D Occupancy Room Map (with speedA/speedB fallback past ±32767° int16 clamp!)
       mapperRef.current.update({
         encA: st.telemetry?.encA ?? 0,
         encB: st.telemetry?.encB ?? 0,
-        gyroHeadingDeg: st.phoneHeadingDeg,
+        speedA: st.telemetry?.speedA,
+        speedB: st.telemetry?.speedB,
+        dtMs,
+        gyroHeadingDeg: activeHeadingDeg,
         frontDistancePct: st.distancePct,
         corridors,
+        camOffsetCm: st.calibration.camOffsetCm,
       });
 
       const driverIdle = now - hostDriverInputRef.current.at > 280;
       let noteOut = driverIdle
         ? lockedTarget
           ? `Following ${lockedTarget.label}`
-          : "Smart Co-Pilot ready"
+          : "On-Board Auto-Pilot ready"
         : hostAssistNoteRef.current;
       let interveningOut = driverIdle ? "none" : hostInterveningRef.current;
       let fsmOut = "IDLE";
       let stuckNow = false;
+      let cmdLeft = 0;
+      let cmdRight = 0;
+      let cmdSteer = 0;
+      let cmdThrottle = 0;
+      let discoveryLabel: string | undefined;
+      let lowBatteryFlag = false;
+      let stuckReason: string | undefined;
 
       if (st.connected && !st.disabled && st.assistMode === "explorer") {
         const expRes = explorerRef.current.step({
@@ -1040,10 +1147,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           bump: Boolean(st.telemetry && (st.telemetry.flags & TelemetryFlag.BUMP)),
           frontDistancePct: st.distancePct,
           corridors,
+          sweptClear,
           bestSteer,
           flowForward,
+          flowTurn,
+          flowConfidence,
           encA: st.telemetry?.encA ?? 0,
           encB: st.telemetry?.encB ?? 0,
+          speedA: st.telemetry?.speedA,
+          speedB: st.telemetry?.speedB,
+          batteryMv: st.telemetry?.batteryMv,
           objects,
           mapper: mapperRef.current,
         });
@@ -1052,12 +1165,19 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         interveningOut =
           expRes.state === "AVOIDING" || expRes.state === "UNSTICKING" ? "dodging" : "none";
         stuckNow = expRes.state === "UNSTICKING";
+        cmdLeft = expRes.left;
+        cmdRight = expRes.right;
+        cmdSteer = expRes.steer;
+        cmdThrottle = expRes.throttle;
+        lowBatteryFlag = Boolean(expRes.lowBattery);
+        stuckReason = expRes.stuckReason;
         hostAssistNoteRef.current = noteOut;
         hostInterveningRef.current = interveningOut;
         setExplorerState(expRes.state);
         setAssistNote(expRes.statusNote);
         setAssistIntervening(interveningOut);
         setRecoveries(expRes.recoveries);
+        setFoldMotorCmd({ left: expRes.left, right: expRes.right, steer: expRes.steer });
 
         // 750ms watchdog timeout prevents jerky Move Hub motor stops on any camera/AI frame hiccup!
         // Only play synth when actually stopped (e.g. MISSION_COMPLETE) so motor coils never stutter!
@@ -1066,6 +1186,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           cbRef.current.onSynth(0, expRes.synthSfx, 0);
         }
         if (expRes.discovery) {
+          discoveryLabel = expRes.discovery.label;
           recordDiscovery(expRes.discovery.label, expRes.discovery.confidence, video);
         }
       } else if (st.connected && !st.disabled && st.assistMode === "copilot" && driverIdle && lockedTarget) {
@@ -1077,7 +1198,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           corridors,
           pickedUp: st.pickedUp,
           safeMode: st.safeMode,
-          headingDeg: st.phoneHeadingDeg,
+          headingDeg: activeHeadingDeg,
           encA: st.telemetry?.encA ?? 0,
           encB: st.telemetry?.encB ?? 0,
           collisionGuard: st.collisionGuard,
@@ -1088,18 +1209,37 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         });
         noteOut = res.statusNote;
         interveningOut = res.intervening;
+        cmdLeft = res.left;
+        cmdRight = res.right;
+        cmdSteer = res.effectiveSteer;
+        cmdThrottle = res.effectiveThrottle;
         hostAssistNoteRef.current = noteOut;
         hostInterveningRef.current = interveningOut;
         setAssistNote(res.statusNote);
         setAssistIntervening(res.intervening);
+        setFoldMotorCmd({ left: res.left, right: res.right, steer: res.effectiveSteer });
         cbRef.current.onDrive(res.left, res.right, 550);
+      } else {
+        setFoldMotorCmd((prev) => (prev.left === 0 && prev.right === 0 ? prev : { left: 0, right: 0, steer: 0 }));
       }
+
+      const elapsedMs = Number((performance.now() - tStart).toFixed(1));
+      setVisionMs(elapsedMs);
 
       const snapshot: RoverVisionSnapshot = {
         corridors,
+        horizonYs,
+        sweptClear,
         bestSteer,
         flowForward,
+        flowTurn,
+        flowConfidence,
+        validFlowPatches,
         stuck: stuckNow,
+        floorRgb,
+        floorNoise,
+        avgLuma,
+        floorPatch,
         laneOffset,
         lockedTarget,
         objects,
@@ -1108,6 +1248,89 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       latestVisionRef.current = snapshot;
       setLocalVision(snapshot);
 
+      // Record Black-Box telemetry tick when recording is active
+      if (recorderRef.current.isRecording()) {
+        const pose = mapperRef.current.getPoseCm();
+        const mapSnapNow = mapperRef.current.getSnapshot();
+        recorderRef.current.recordTick(
+          {
+            assistMode: st.assistMode,
+            mission: st.mission,
+            fsmState: fsmOut,
+            statusNote: noteOut,
+            corridors,
+            horizonYs,
+            sweptClear,
+            bestSteer,
+            floorRgb,
+            floorNoise,
+            avgLuma,
+            floorPatch,
+            flowForward,
+            flowTurn,
+            flowConfidence,
+            validPatches: validFlowPatches,
+            objects: objects.map((o) => ({
+              label: o.label,
+              score: Number(o.score.toFixed(2)),
+              x: Number(o.x.toFixed(3)),
+              y: Number(o.y.toFixed(3)),
+              w: Number(o.w.toFixed(3)),
+              h: Number(o.h.toFixed(3)),
+              source: o.source,
+            })),
+            hw: {
+              bleConnected: st.connected,
+              batteryMv: st.telemetry?.batteryMv ?? null,
+              distPct: st.distancePct <= 100 ? st.distancePct : null,
+              colorId: st.telemetry?.colorId ?? null,
+              pitch: st.telemetry?.pitchDeg ?? null,
+              roll: st.telemetry?.rollDeg ?? null,
+              flags: st.telemetry?.flags ?? null,
+              bump: Boolean(st.telemetry && (st.telemetry.flags & TelemetryFlag.BUMP)),
+              pickedUp: st.pickedUp,
+              safeMode: st.safeMode,
+              sensorOk: Boolean(st.telemetry && (st.telemetry.flags & TelemetryFlag.SENSOR_OK)),
+              encA: st.telemetry?.encA ?? 0,
+              encB: st.telemetry?.encB ?? 0,
+              speedA: st.telemetry?.speedA ?? 0,
+              speedB: st.telemetry?.speedB ?? 0,
+            },
+            phone: {
+              headingDeg: activeHeadingDeg,
+              yawRateDegS: headingSnap.yawRateDegS,
+              headingSource: headingSnap.source,
+              mountPitchDeg: headingSnap.mountPitchDeg,
+              mountRollDeg: headingSnap.mountRollDeg,
+              rawAlpha: headingSnap.rawAlpha,
+              rawBeta: headingSnap.rawBeta,
+              rawGamma: headingSnap.rawGamma,
+              torchOn: st.headlightsOn,
+              visionMs: elapsedMs,
+              aiReady: aiDetectorRef.current.isReady(),
+            },
+            map: {
+              xCm: Math.round(pose.x),
+              yCm: Math.round(pose.y),
+              headingDeg: Math.round(pose.headingDeg),
+              frontierBias: Number(mapperRef.current.getFrontierBias().toFixed(2)),
+              coveragePct: mapSnapNow.coveragePct,
+              distanceM: mapSnapNow.distanceMeters,
+              encSaturated: mapperRef.current.isEncoderSaturated(),
+            },
+            cmd: {
+              left: cmdLeft,
+              right: cmdRight,
+              steer: Number(cmdSteer.toFixed(2)),
+              throttle: Number(cmdThrottle.toFixed(2)),
+              recoveries: explorerRef.current.getRecoveries(),
+            },
+          },
+          video,
+          { discoveryLabel, lowBattery: lowBatteryFlag, stuckReason }
+        );
+      }
+
       const isHostLive =
         bridgeRef.current?.getRole() === "rover-host" && bridgeRef.current.isDataChannelOpen();
 
@@ -1115,6 +1338,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         lastMapPushRef.current = now;
         const mapSnap = mapperRef.current.getSnapshot();
         setLocalMap(mapSnap);
+        if (recorderRef.current.isRecording()) {
+          setRunStats(recorderRef.current.getStats(mapSnap));
+        }
         if (isHostLive) {
           bridgeRef.current!.sendToDriver({ type: "map", snapshot: mapSnap });
         }
@@ -1127,7 +1353,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
           bleConnected: st.connected,
           headlightsOn: st.headlightsOn,
           torchSupported: st.hostTorchSupported,
-          phoneHeadingDeg: st.phoneHeadingDeg,
+          phoneHeadingDeg: activeHeadingDeg,
           assistNote: noteOut,
           assistIntervening: interveningOut,
           explorerState: fsmOut,
@@ -1139,7 +1365,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }, 100);
 
     return () => window.clearInterval(id);
-  }, [hostActive, recordDiscovery]);
+  }, [applyHostTorch, onBoardLoopActive, recordDiscovery]);
 
   // Driver Client: 1 Hz RTT ping monitor
   useEffect(() => {
@@ -1150,17 +1376,74 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     return () => window.clearInterval(id);
   }, [linkState]);
 
-  // Android Phone Gyroscope orientation listener while hosting
+  // Gimbal-lock-free Pixel Fold / Android IMU heading listener (devicemotion gravity-projected gyro + matrix fallback)
+  const imuActive = hostActive || hostCameraActive || subView === "fold";
   useEffect(() => {
-    if (!hostActive) return;
-    const onOrient = (ev: DeviceOrientationEvent) => {
-      if (typeof ev.alpha === "number" && Number.isFinite(ev.alpha)) {
-        setPhoneHeadingDeg(Math.round((360 - ev.alpha) % 360));
+    if (!imuActive) return;
+    let lastEmit = 0;
+
+    const emitSnapshot = (snap: FoldHeadingSnapshot) => {
+      const now = Date.now();
+      if (now - lastEmit < 100) return;
+      lastEmit = now;
+      setFoldHeading(snap);
+      if (snap.headingDeg !== null) {
+        setPhoneHeadingDeg(snap.headingDeg);
       }
     };
+
+    const onMotion = (ev: DeviceMotionEvent) => {
+      const snap = headingTrackerRef.current.ingestMotion({
+        nowMs: Date.now(),
+        ax: ev.accelerationIncludingGravity?.x,
+        ay: ev.accelerationIncludingGravity?.y,
+        az: ev.accelerationIncludingGravity?.z,
+        rotBeta: ev.rotationRate?.beta,
+        rotGamma: ev.rotationRate?.gamma,
+        rotAlpha: ev.rotationRate?.alpha,
+        intervalMs: ev.interval,
+      });
+      emitSnapshot(snap);
+    };
+
+    const onOrient = (ev: DeviceOrientationEvent) => {
+      const snap = headingTrackerRef.current.ingestOrientation({
+        alpha: ev.alpha,
+        beta: ev.beta,
+        gamma: ev.gamma,
+      });
+      emitSnapshot(snap);
+    };
+
+    window.addEventListener("devicemotion", onMotion);
     window.addEventListener("deviceorientation", onOrient);
-    return () => window.removeEventListener("deviceorientation", onOrient);
-  }, [hostActive]);
+    return () => {
+      window.removeEventListener("devicemotion", onMotion);
+      window.removeEventListener("deviceorientation", onOrient);
+    };
+  }, [imuActive]);
+
+  // Re-acquire Screen Wake Lock if Android returns from background / notification shade
+  useEffect(() => {
+    if (!onBoardLoopActive) return;
+    const onVis = () => {
+      if (document.visibilityState !== "visible" || wakeLockRef.current) return;
+      const navWithWake = navigator as unknown as {
+        wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
+      };
+      if (navWithWake.wakeLock) {
+        void navWithWake.wakeLock
+          .request("screen")
+          .then((lock) => {
+            wakeLockRef.current = lock;
+            setHostWakeLocked(true);
+          })
+          .catch(() => undefined);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [onBoardLoopActive]);
 
   const stopHostCamera = useCallback(() => {
     advertiserRef.current?.stop();
@@ -1170,6 +1453,13 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     hostStreamRef.current = null;
     if (s) s.getTracks().forEach((t) => t.stop());
     if (hostVideoRef.current) hostVideoRef.current.srcObject = null;
+    if (liveRef.current.assistMode === "explorer") {
+      explorerRef.current.reset();
+      setAssistMode("copilot");
+      if (liveRef.current.connected) {
+        cbRef.current.onDrive(0, 0, 200);
+      }
+    }
     setHostActive(false);
     setHostCameraActive(false);
     setHostTorchSupported(false);
@@ -1181,11 +1471,30 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     }
   }, []);
 
-  const startHostCameraAndBroadcast = useCallback(async () => {
+  const openLocalRearCamera = useCallback(async (preferredDeviceId?: string): Promise<MediaStream | null> => {
     setHostCameraError(null);
+    // Stop any previous camera track cleanly before switching lenses
+    const prev = hostStreamRef.current;
+    if (prev) {
+      prev.getTracks().forEach((t) => t.stop());
+      hostStreamRef.current = null;
+    }
+
     let stream: MediaStream | null = null;
     if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-      const candidates: MediaStreamConstraints[] = [
+      const candidates: MediaStreamConstraints[] = [];
+      if (preferredDeviceId) {
+        candidates.push({
+          video: {
+            deviceId: { exact: preferredDeviceId },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 24 },
+          },
+          audio: false,
+        });
+      }
+      candidates.push(
         {
           video: {
             facingMode: { ideal: "environment" },
@@ -1202,8 +1511,9 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         {
           video: true,
           audio: false,
-        },
-      ];
+        }
+      );
+
       let lastCamErr: unknown = null;
       for (const constraints of candidates) {
         try {
@@ -1224,9 +1534,26 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         const track = stream.getVideoTracks()[0];
         const caps = track?.getCapabilities ? (track.getCapabilities() as { torch?: boolean }) : {};
         setHostTorchSupported(Boolean(caps.torch));
+
+        // Enumerate rear camera lenses (e.g. Pixel Fold Wide vs Ultrawide if exposed by Chrome)
+        if (navigator.mediaDevices.enumerateDevices) {
+          void navigator.mediaDevices
+            .enumerateDevices()
+            .then((devs) => {
+              const cams = devs
+                .filter((d) => d.kind === "videoinput")
+                .filter((d) => !/front|user/i.test(d.label || ""))
+                .map((d, i) => ({
+                  deviceId: d.deviceId,
+                  label: d.label || `Rear Lens ${i + 1}`,
+                }));
+              setRearCameras(cams);
+            })
+            .catch(() => undefined);
+        }
       } else if (lastCamErr) {
         setHostCameraError(
-          `Camera note: ${lastCamErr instanceof Error ? lastCamErr.message : String(lastCamErr)} — continuing Wi-Fi control link.`
+          `Camera note: ${lastCamErr instanceof Error ? lastCamErr.message : String(lastCamErr)}`
         );
       }
     }
@@ -1234,7 +1561,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     const navWithWake = navigator as unknown as {
       wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
     };
-    if (navWithWake.wakeLock) {
+    if (navWithWake.wakeLock && !wakeLockRef.current) {
       try {
         wakeLockRef.current = await navWithWake.wakeLock.request("screen");
         setHostWakeLocked(true);
@@ -1243,6 +1570,19 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
       }
     }
 
+    return stream;
+  }, []);
+
+  /** Single-device Pixel Fold 90° camera start — ZERO Wi-Fi / WebRTC / MQTT overhead! */
+  const startFoldCameraOnly = useCallback(
+    async (preferredDeviceId?: string) => {
+      await openLocalRearCamera(preferredDeviceId ?? liveRef.current.calibration.cameraDeviceId);
+    },
+    [openLocalRearCamera]
+  );
+
+  const startHostCameraAndBroadcast = useCallback(async () => {
+    const stream = await openLocalRearCamera(liveRef.current.calibration.cameraDeviceId);
     try {
       await bridgeRef.current?.startHost(roomCode, stream);
       setHostActive(true);
@@ -1258,7 +1598,136 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     } catch (err) {
       setHostCameraError(err instanceof Error ? err.message : String(err));
     }
-  }, [roomCode]);
+  }, [openLocalRearCamera, roomCode]);
+
+  const handleCalibrationChange = useCallback((next: MountCalibration) => {
+    setCalibration(next);
+    saveMountCalibration(next);
+    recorderRef.current.setCalibration(next);
+  }, []);
+
+  const handleRelearnFloor = useCallback(() => {
+    floorModelRef.current = createFloorModel();
+    setAssistNote("Floor model reset — sampling clean floor now");
+  }, []);
+
+  const handleToggleRecording = useCallback(() => {
+    setExportNotice(null);
+    if (recorderRef.current.isRecording()) {
+      recorderRef.current.stop(hostVideoRef.current);
+      setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+      setExportNotice("Recording stopped — tap Share Run (.zip) or Contact Sheet (.png) to send feedback.");
+    } else {
+      recorderRef.current.start(liveRef.current.calibration);
+      setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+    }
+  }, []);
+
+  const handleMarkProblem = useCallback((tag: ProblemTagKind) => {
+    const ev = recorderRef.current.markProblem(tag, hostVideoRef.current);
+    setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+    const meta = PROBLEM_TAGS.find((t) => t.id === tag);
+    const sec = ev ? (ev.tMs / 1000).toFixed(1) : "0.0";
+    setLastTagFeedback(`Marked "${meta?.label ?? tag}" @ ${sec}s (frame saved)`);
+    if (tagToastTimerRef.current) {
+      window.clearTimeout(tagToastTimerRef.current);
+    }
+    tagToastTimerRef.current = window.setTimeout(() => {
+      setLastTagFeedback(null);
+    }, 2600);
+  }, []);
+
+  const handleExportZip = useCallback(async (preferShare: boolean) => {
+    setExportBusy(true);
+    setExportNotice(null);
+    try {
+      const mapSnap = mapperRef.current.getSnapshot();
+      const { filename, file } = await recorderRef.current.buildZipBundle(mapSnap);
+      const outcome = await shareOrDownloadFile(file, "Vernie Pilot Field Run", preferShare);
+      setExportNotice(
+        outcome === "shared"
+          ? `Opened Share Sheet for ${filename} (${Math.round(file.size / 1024)} KB) — upload into chat!`
+          : `Downloaded ${filename} (${Math.round(file.size / 1024)} KB) — upload into chat!`
+      );
+    } catch (err) {
+      setExportNotice(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportBusy(false);
+    }
+  }, []);
+
+  const handleExportContactSheet = useCallback(async () => {
+    setExportBusy(true);
+    setExportNotice(null);
+    try {
+      const mapSnap = mapperRef.current.getSnapshot();
+      const pngUrl = await recorderRef.current.renderContactSheetPng(mapSnap);
+      if (!pngUrl) {
+        setExportNotice("Could not render contact sheet PNG on this browser.");
+        return;
+      }
+      const res = await fetch(pngUrl);
+      const blob = await res.blob();
+      const file = new File([blob], `vernie-fold-sheet-${Date.now()}.png`, { type: "image/png" });
+      const outcome = await shareOrDownloadFile(file, "Vernie Pilot Contact Sheet", true);
+      setExportNotice(
+        outcome === "shared"
+          ? `Shared ${file.name} — upload into chat for frame-by-frame review!`
+          : `Saved ${file.name} — upload into chat for frame-by-frame review!`
+      );
+    } catch (err) {
+      setExportNotice(`Contact sheet failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportBusy(false);
+    }
+  }, []);
+
+  const handleCopySummary = useCallback(() => {
+    const md = recorderRef.current.buildSummaryMarkdown(mapperRef.current.getSnapshot());
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard
+        .writeText(md)
+        .then(() => setExportNotice("Copied Markdown run report to clipboard — paste right into chat!"))
+        .catch(() => setExportNotice("Clipboard blocked — use Share Run (.zip) instead."));
+    } else {
+      setExportNotice("Clipboard unavailable — use Share Run (.zip) instead.");
+    }
+  }, []);
+
+  const handleClearRun = useCallback(() => {
+    recorderRef.current.clear();
+    setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+    setExportNotice(null);
+  }, []);
+
+  const handleToggleFoldExplore = useCallback(async () => {
+    if (liveRef.current.assistMode === "explorer") {
+      explorerRef.current.reset();
+      setAssistMode("copilot");
+      if (liveRef.current.connected) {
+        cbRef.current.onDrive(0, 0, 200);
+      }
+      if (recorderRef.current.isRecording()) {
+        recorderRef.current.stop(hostVideoRef.current);
+        setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+        setExportNotice("Run paused & saved — tap Share Run (.zip) or Contact Sheet (.png)!");
+      }
+      return;
+    }
+
+    // Starting Auto Explore on Pixel Fold: auto-open rear camera & auto-start Black-Box Recorder!
+    if (!hostStreamRef.current) {
+      await startFoldCameraOnly();
+    }
+    floorModelRef.current = createFloorModel();
+    explorerRef.current.reset();
+    if (autoRecord && !recorderRef.current.isRecording()) {
+      recorderRef.current.start(liveRef.current.calibration);
+      setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+    }
+    setExportNotice(null);
+    setAssistMode("explorer");
+  }, [autoRecord, startFoldCameraOnly]);
 
   const handleJoinCode = useCallback(async (rawCode: string) => {
     const code = normalizeRoomCode(rawCode);
@@ -1300,11 +1769,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
     wasDrivingRef.current = false;
     hsvLockRef.current = null;
     setLockedLabel(null);
+    if (recorderRef.current.isRecording() && liveRef.current.assistMode === "explorer") {
+      recorderRef.current.markManualOverride(hostVideoRef.current);
+      setRunStats(recorderRef.current.getStats(mapperRef.current.getSnapshot()));
+    }
     if (liveRef.current.assistMode === "explorer") {
       setAssistMode("copilot");
     }
     setSteerVis(0);
     setThrottleVis(0);
+    setFoldMotorCmd({ left: 0, right: 0, steer: 0 });
     driveCtrlRef.current.reset();
     explorerRef.current.reset();
     if (bridgeRef.current?.getRole() === "driver-client" && bridgeRef.current.isDataChannelOpen()) {
@@ -1712,6 +2186,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
   // Global teardown on unmount
   useEffect(() => {
     return () => {
+      if (tagToastTimerRef.current) window.clearTimeout(tagToastTimerRef.current);
       if (wasDrivingRef.current || vrWasDrivingRef.current) sendFpvStop();
       void vrSessionRef.current?.stop();
       scannerRef.current?.stop();
@@ -1937,6 +2412,16 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         <div className="segmented-mini" role="tablist" aria-label="Rover camera role">
           <button
             type="button"
+            id="role-fold"
+            role="tab"
+            aria-selected={subView === "fold"}
+            className={subView === "fold" ? "is-active" : ""}
+            onClick={() => setSubView("fold")}
+          >
+            On-Board Auto-Pilot (Fold 90°)
+          </button>
+          <button
+            type="button"
             id="role-driver"
             role="tab"
             aria-selected={subView === "driver"}
@@ -1968,14 +2453,87 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
         </div>
 
         <div className="fpv-link-badge">
-          <IconWifi size={14} />
-          <span>
-            {linkState === "connected"
-              ? `${transportMode === "relay" ? "Wi-Fi Relay Live" : "Wi-Fi FPV Live"}${pingMs ? ` · ${pingMs} ms` : ""}`
-              : linkDetail}
-          </span>
+          {subView === "fold" ? (
+            <>
+              <IconCamera size={14} />
+              <span>
+                {hostCameraActive
+                  ? `On-Board Local Mode · ${visionMs.toFixed(0)} ms (No Wi-Fi needed)`
+                  : "On-Board Local Mode (Single Device)"}
+              </span>
+            </>
+          ) : (
+            <>
+              <IconWifi size={14} />
+              <span>
+                {linkState === "connected"
+                  ? `${transportMode === "relay" ? "Wi-Fi Relay Live" : "Wi-Fi FPV Live"}${pingMs ? ` · ${pingMs} ms` : ""}`
+                  : linkDetail}
+              </span>
+            </>
+          )}
         </div>
       </div>
+
+      {/* =========================================
+          VIEW 0: PIXEL FOLD 90° SINGLE-DEVICE ON-BOARD AUTO-PILOT
+         ========================================= */}
+      {subView === "fold" && (
+        <FoldAutoPilotView
+          videoRef={hostVideoRef}
+          bleConnected={connected}
+          bleDisabled={disabled}
+          cameraActive={hostCameraActive}
+          cameraError={hostCameraError}
+          wakeLocked={hostWakeLocked}
+          torchSupported={hostTorchSupported}
+          headlightsOn={headlightsOn}
+          autoHeadlights={autoHeadlights}
+          telemetry={telemetry}
+          heading={foldHeading}
+          vision={localVision}
+          visionMs={visionMs}
+          map={localMap}
+          discoveries={discoveries}
+          assistMode={assistMode}
+          mission={mission}
+          explorerState={explorerState}
+          assistNote={assistNote}
+          speedCap={speedCap}
+          aiEnabled={aiEnabled}
+          aiStatusNote={aiStatusNote}
+          showCorridors={showCorridors}
+          recoveries={recoveries}
+          motorCmd={foldMotorCmd}
+          calibration={calibration}
+          rearCameras={rearCameras}
+          runStats={runStats}
+          autoRecord={autoRecord}
+          lastTagFeedback={lastTagFeedback}
+          exportBusy={exportBusy}
+          exportNotice={exportNotice}
+          onStartCamera={(devId) => void startFoldCameraOnly(devId)}
+          onStopCamera={stopHostCamera}
+          onToggleExplore={() => void handleToggleFoldExplore()}
+          onEmergencyStop={sendFpvStop}
+          onMissionChange={setMission}
+          onSpeedCapChange={setSpeedCap}
+          onToggleAi={() => setAiEnabled((v) => !v)}
+          onToggleCorridors={() => setShowCorridors((v) => !v)}
+          onToggleHeadlights={toggleHeadlights}
+          onToggleAutoHeadlights={() => setAutoHeadlights((v) => !v)}
+          onCalibrationChange={handleCalibrationChange}
+          onRelearnFloor={handleRelearnFloor}
+          onResetMap={handleResetMap}
+          onToggleRecording={handleToggleRecording}
+          onToggleAutoRecord={() => setAutoRecord((v) => !v)}
+          onMarkProblem={handleMarkProblem}
+          onExportZip={(preferShare) => void handleExportZip(preferShare)}
+          onExportContactSheet={() => void handleExportContactSheet()}
+          onCopySummary={handleCopySummary}
+          onClearRun={handleClearRun}
+        />
+      )}
 
       {/* =========================================
           VIEW 1: CHROMEBOOK / META QUEST VR DRIVER COCKPIT
@@ -2843,6 +3401,7 @@ export const RoverCockpitStation: React.FC<RoverCockpitStationProps> = ({
                   frontDistPct={hudDist}
                   vision={localVision}
                   showCorridors={true}
+                  calibration={calibration}
                 />
               )}
             </div>

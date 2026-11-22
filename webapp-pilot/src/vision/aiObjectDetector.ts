@@ -26,9 +26,14 @@ export class OnDeviceObjectDetector {
   private detector: MediaPipeDetectorLike | null = null;
   private loadingPromise: Promise<boolean> | null = null;
   private errorMsg: string | null = null;
+  private activeDelegate: "GPU" | "CPU" | null = null;
 
   isReady(): boolean {
     return this.detector !== null;
+  }
+
+  getDelegate(): "GPU" | "CPU" | null {
+    return this.activeDelegate;
   }
 
   getError(): string | null {
@@ -57,17 +62,35 @@ export class OnDeviceObjectDetector {
 
         const mod = await dynamicImport(MEDIAPIPE_BUNDLE_URL);
         const fileset = await mod.FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_DIR);
-        this.detector = await mod.ObjectDetector.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: EFFICIENTDET_MODEL_URL,
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          scoreThreshold: 0.42,
-          maxResults: 6,
-        });
-        return true;
+
+        // Try GPU first (fast on Pixel Fold Tensor G2), automatically falling back to CPU WASM if GPU WebGL fails
+        try {
+          this.detector = await mod.ObjectDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: EFFICIENTDET_MODEL_URL,
+              delegate: "GPU",
+            },
+            runningMode: "VIDEO",
+            scoreThreshold: 0.42,
+            maxResults: 6,
+          });
+          this.activeDelegate = "GPU";
+          return true;
+        } catch {
+          this.detector = await mod.ObjectDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: EFFICIENTDET_MODEL_URL,
+              delegate: "CPU",
+            },
+            runningMode: "VIDEO",
+            scoreThreshold: 0.42,
+            maxResults: 6,
+          });
+          this.activeDelegate = "CPU";
+          return true;
+        }
       } catch (err) {
+        this.activeDelegate = null;
         this.errorMsg =
           err instanceof Error
             ? `AI Vision offline/unavailable (${err.message.slice(0, 60)}) — using built-in floor & color vision.`

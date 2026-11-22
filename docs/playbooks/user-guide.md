@@ -145,9 +145,17 @@ One-click wireless firmware updates, custom `.bin` verification, and step-by-ste
 
 ---
 
-# 5. Remote FPV Driving, Smart Co-Pilot & Meta Quest VR
+# 5. On-Board Auto-Pilot (Pixel Fold 90°), Remote FPV & Meta Quest VR
 
-Turn a **spare Android phone** mounted on your tank into a live wireless camera + Bluetooth bridge, and drive from another room on your **Chromebook**, **Mac**, **PC**, or **Meta Quest VR headset**!
+You can run camera-guided Auto Exploration on a **single Android foldable/phone** (such as a **2023 Pixel Fold** half-folded at 90° on top of your tank with the rear camera pointing forward — **no second device or Wi-Fi required**), *or* pair an Android phone with a **Chromebook**, **Mac**, **PC**, or **Meta Quest VR headset** over Wi-Fi!
+
+## Single-Device On-Board Auto-Pilot (Pixel Fold 90° Tabletop Mode)
+
+1. Fold your **Pixel Fold** to **90°** so the lower half rests flat on the tank and the upper half stands upright with the **rear camera pointing forward**.
+2. Open **[https://jpdsmith.github.io/LegoBoost/pilot/](https://jpdsmith.github.io/LegoBoost/pilot/)** in Chrome, tap **Connect Robot** (Bluetooth), open **FPV Rover**, and pick **On-Board Auto-Pilot (Fold 90°)** (selected automatically on Android).
+3. Tap **Start On-Board Rear Camera** and optionally **90° Full Fold** to split the live camera visor + 2D Room Map cleanly onto the upright top half, keep the hinge crease button-free, and place the big **Start Auto Explore** / **STOP** paddles and **1-Tap Problem Tagger** on the flat lower half.
+4. **Calibrate Left-Offset Camera:** Open **Mount (-4cm)** and slide **Camera Left/Right Offset** until the dashed cyan chassis rails match your tank's real left & right treads (protecting the right corner when the camera sits left of center).
+5. **Record & Share Real-Life Test Runs:** Recording starts automatically with Auto Explore. Tap **Hit Obstacle**, **Clipped Right**, **False Wall**, **Stuck / Spin**, **Bad Turn**, or **Good Dodge** whenever you see something notable, then tap **Share Run (.zip)** or **Contact Sheet (.png)** to export the complete telemetry + annotated frames right from the Android Share Sheet.
 
 ## Two-Device Wi-Fi Pairing (Zero IP Address Needed!)
 

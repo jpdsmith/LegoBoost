@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: MIT
 // Interactive FPV HUD SVG Overlay:
-//   - 5-sector translucent Free-Floor Clearance Fan (shows what the Rover's brain sees)
+//   - 5-sector translucent Free-Floor Clearance Fan (aligned to real horizonYs when available)
+//   - Asymmetric Swept-Bumper Chassis Rails (compensating for left-offset Pixel Fold rear camera!)
+//   - Optional Floor Sample Patch box (verifies LEGO bumper isn't polluting floor calibration)
 //   - Dynamic Predictive Steering Trajectory Arcs
 //   - Front Bumper 88007 Proximity Radar Arc
 //   - Clickable AI / HSV Object Bounding Boxes for 1-tap Tap-to-Follow
 
 import React from "react";
 import { DetectedObjectBox, RoverVisionSnapshot } from "../rtc/roverBridge";
+import { computeSweptBumperBounds, MountCalibration } from "../vision/roverVision";
 
 export interface FpvOverlaySvgProps {
   steer: number;
   frontDistPct: number | null;
   vision: RoverVisionSnapshot | null;
   showCorridors: boolean;
+  /** Optional mount calibration to draw true asymmetric left/right swept robot bumper rails */
+  calibration?: MountCalibration;
+  /** Show subtle floor-sampling patch rectangle for visual mount verification */
+  showFloorPatch?: boolean;
   onSelectObject?: (box: DetectedObjectBox) => void;
 }
 
@@ -23,9 +30,9 @@ function corridorFill(clearance: number): string {
 }
 
 function corridorStroke(clearance: number): string {
-  if (clearance < 0.25) return "rgba(248, 113, 113, 0.8)";
-  if (clearance < 0.5) return "rgba(251, 191, 36, 0.78)";
-  return "rgba(74, 222, 128, 0.72)";
+  if (clearance < 0.25) return "rgba(248, 113, 113, 0.84)";
+  if (clearance < 0.5) return "rgba(251, 191, 36, 0.8)";
+  return "rgba(74, 222, 128, 0.74)";
 }
 
 export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
@@ -33,8 +40,12 @@ export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
   frontDistPct,
   vision,
   showCorridors,
+  calibration,
+  showFloorPatch = false,
   onSelectObject,
 }) => {
+  const W = 640;
+  const H = 360;
   const curveOffset = Math.round(steer * 145);
   const trajectoryColor =
     frontDistPct !== null && frontDistPct <= 30
@@ -44,8 +55,37 @@ export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
         : "#38BDF8";
 
   const corridors = vision?.corridors ?? null;
+  const horizonYs = vision?.horizonYs ?? null;
   const objects = vision?.objects ?? [];
   const lockedId = vision?.lockedTarget?.id ?? null;
+
+  const bottomY = calibration ? Math.round(calibration.bumperMaskY * H) : 330;
+  const topHorizonY = calibration ? Math.round(calibration.horizonY * H) : 158;
+
+  // Asymmetric left/right chassis path rails when mount calibration is active
+  let chassisRails: {
+    leftPts: string;
+    rightPts: string;
+    centerNearX: number;
+    centerFarX: number;
+    color: string;
+  } | null = null;
+  if (calibration) {
+    const nearB = computeSweptBumperBounds(calibration, 0);
+    const midB = computeSweptBumperBounds(calibration, 0.45);
+    const farB = computeSweptBumperBounds(calibration, 1);
+    const yMid = Math.round(bottomY - (bottomY - topHorizonY) * 0.45);
+    const sweptClr = vision?.sweptClear ?? 1;
+    chassisRails = {
+      leftPts: `${Math.round(nearB.uLeft * W)},${bottomY} ${Math.round(midB.uLeft * W)},${yMid} ${Math.round(farB.uLeft * W)},${topHorizonY}`,
+      rightPts: `${Math.round(nearB.uRight * W)},${bottomY} ${Math.round(midB.uRight * W)},${yMid} ${Math.round(farB.uRight * W)},${topHorizonY}`,
+      centerNearX: Math.round(nearB.uCenter * W),
+      centerFarX: Math.round(farB.uCenter * W),
+      color: sweptClr < 0.25 ? "#F87171" : sweptClr < 0.5 ? "#FBBF24" : "#38BDF8",
+    };
+  }
+
+  const floorPatch = showFloorPatch ? vision?.floorPatch : undefined;
 
   return (
     <>
@@ -61,11 +101,14 @@ export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
             {corridors.map((clr, idx) => {
               const x0 = idx * 128;
               const x1 = x0 + 128;
-              const topY = Math.round(326 - clr * 150);
+              const topY =
+                horizonYs && typeof horizonYs[idx] === "number"
+                  ? Math.round(Math.max(40, Math.min(bottomY - 4, horizonYs[idx] * H)))
+                  : Math.round(326 - clr * 150);
               return (
                 <g key={idx}>
                   <polygon
-                    points={`${x0 + 4},330 ${x0 + 10},${topY} ${x1 - 10},${topY} ${x1 - 4},330`}
+                    points={`${x0 + 4},${bottomY} ${x0 + 10},${topY} ${x1 - 10},${topY} ${x1 - 4},${bottomY}`}
                     fill={corridorFill(clr)}
                     stroke={corridorStroke(clr)}
                     strokeWidth="1.5"
@@ -83,6 +126,64 @@ export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
               );
             })}
           </g>
+        )}
+
+        {/* Asymmetric Swept-Bumper Chassis Rails (visualizes left-offset camera right-tread clearance!) */}
+        {chassisRails && (
+          <g opacity="0.92">
+            <polyline
+              points={chassisRails.leftPts}
+              fill="none"
+              stroke={chassisRails.color}
+              strokeWidth="2.8"
+              strokeDasharray="8 5"
+              strokeLinecap="round"
+            />
+            <polyline
+              points={chassisRails.rightPts}
+              fill="none"
+              stroke={chassisRails.color}
+              strokeWidth="2.8"
+              strokeDasharray="8 5"
+              strokeLinecap="round"
+            />
+            <line
+              x1={chassisRails.centerNearX}
+              y1={bottomY}
+              x2={chassisRails.centerFarX}
+              y2={topHorizonY}
+              stroke="rgba(255,255,255,0.45)"
+              strokeWidth="1.2"
+              strokeDasharray="4 6"
+            />
+          </g>
+        )}
+
+        {/* Bumper mask cutoff line when raised above default */}
+        {calibration && calibration.bumperMaskY < 0.94 && (
+          <line
+            x1="0"
+            y1={bottomY}
+            x2={W}
+            y2={bottomY}
+            stroke="rgba(251, 191, 36, 0.5)"
+            strokeWidth="1.2"
+            strokeDasharray="6 6"
+          />
+        )}
+
+        {/* Floor Sample Patch Debug Box */}
+        {floorPatch && (
+          <rect
+            x={Math.round(floorPatch.x * W)}
+            y={Math.round(floorPatch.y * H)}
+            width={Math.round(floorPatch.w * W)}
+            height={Math.round(floorPatch.h * H)}
+            fill="rgba(250, 204, 21, 0.08)"
+            stroke="rgba(250, 204, 21, 0.85)"
+            strokeWidth="1.6"
+            strokeDasharray="4 3"
+          />
         )}
 
         {/* Lane Assist Center Guide when detected */}
@@ -148,7 +249,9 @@ export const FpvOverlaySvg: React.FC<FpvOverlaySvgProps> = ({
       {/* Interactive HTML Object Bounding Boxes (clickable to Tap-to-Follow!) */}
       <div className="fpv-boxes-layer">
         {objects.map((box) => {
-          const isLocked = box.id === lockedId || (vision?.lockedTarget?.label === box.label && box.source === vision?.lockedTarget?.source);
+          const isLocked =
+            box.id === lockedId ||
+            (vision?.lockedTarget?.label === box.label && box.source === vision?.lockedTarget?.source);
           return (
             <button
               key={box.id}

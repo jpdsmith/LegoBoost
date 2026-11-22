@@ -45,7 +45,7 @@ function readInitialStation(): PilotStation {
   if (typeof window === "undefined") return "drive";
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("role") === "host" || params.get("join")) {
+    if (params.get("role") === "host" || params.get("role") === "fold" || params.get("join")) {
       return "fpv";
     }
     if (isMetaQuestBrowser()) {
